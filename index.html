@@ -224,10 +224,13 @@ const state = {
 
   tilt: 0,                  // seconds of tilt lockout remaining
   nudge: 0,                 // nudge heat
-  wormCd: [0, 0],           // wormhole cooldown
+  wormCd: [0, 0, 0],        // per-wormhole re-entry cooldown
   wormArmed: -1,            // which hole was entered last (for pairing)
   skill: false,             // skill-shot window open
   skillTier: 0,             // 0..3, how deep the plunge went
+  charge: 0,                // plunger charge 0..1 (hold to charge, release to fire)
+  charging: false,
+  plungeMin: 9999,          // highest point (min y) of the current plunge
 
   replay: false,            // REPLAY lamp lit -> next drain is saved
   lanes: [false, false, false],  // three rollover lamps on the top arc
@@ -414,12 +417,29 @@ for (let i = 0; i < RANK_LIGHTS; i++){
   RING_POS.push({x:RING.cx + Math.cos(a) * RING.rad, y:RING.cy + Math.sin(a) * RING.rad});
 }
 
-// wormholes: tucked into the mid-field gaps between posts and ring, far enough
-// from walls and guides that a rolling ball cannot graze an intake by accident
+// wormholes: three chutes in the mid/lower field like the original (blue left, red
+// right, yellow centre above the flippers). A ball that FALLS into a chute or rolls
+// over it slowly is swallowed for a couple of seconds and spat out of one of the OTHER
+// two; a fast ball skips across the opening.
 const WORMS = [
-  {x:150, y:452, r:14, c:C.cyan,   pop:0},
-  {x:330, y:452, r:14, c:C.magenta, pop:0}
+  {x:150, y:452, r:14, c:C.cyan,    pop:0},
+  {x:330, y:452, r:14, c:C.magenta, pop:0},
+  {x:240, y:356, r:14, c:C.gold,    pop:0}
 ];
+
+/* The elevated launch ramp (pseudo-3D upper deck, like the original's raised playfield):
+   a ball that leaves the shooter lane fast enough climbs the ramp, rides ABOVE the table
+   (ignoring every lower-deck collider, drawn with a drop shadow), crosses the dome and
+   drops back down through a hole onto the main playfield after a short delay. */
+const RAMP = {
+  x0:434, y0:740,          // ramp mouth (top of the shooter lane)
+  x1:434, y1:262,          // ramp rises along the right wall
+  cx:240, cy:262, r:194,   // elevated arc across the dome (angles PI -> 2PI)
+  x2:46,  y2:262,          // ramp leaves the arc on the left
+  x3:46,  y3:430,          // ...and runs down the left wall to the drop hole
+  drop:{x:46, y:436},      // hole back to the lower deck
+  enterV:1020              // min upward speed at the lane mouth to make the ramp
+};
 
 // fuel rollovers inside the shooter lane (6 lights, bottom to top)
 const FUEL_N = 6;
@@ -452,7 +472,7 @@ const rightF = new Flipper(FLIP_R.px, FLIP_R.py, FLIP_R.len, FLIP_R.rest, FLIP_R
 const balls = [];
 function spawnBall(x, y, vx, vy){
   const b = {x:x, y:y, vx:(vx||0), vy:(vy||0), r:9, trail:[], stuck:0, tries:0, hiT:0,
-             zg:{x:x, y:y, t:0, n:0}, live:true};
+             zg:{x:x, y:y, t:0, n:0}, live:true, deck:'lower', hidden:false, wormImm:0};
   balls.push(b);
   return b;
 }
@@ -886,6 +906,7 @@ function nudge(dir){
 
 /* ---------------------------- game flow ---------------------------- */
 function resetBall(){
+  state.charge = 0; state.charging = false; state.plungeMin = 9999;
   balls.length = 0;
   spawnBall(434, 754, 0, 0);
   // lamps are a per-ball objective, so they reset with each new ball
@@ -971,7 +992,8 @@ function restart(mode){
   state.missionsDone = 0;
   state.selected = -1; state.mission = null;
   state.tilt = 0; state.nudge = 0; state.wormArmed = -1;
-  state.wormCd = [0, 0];
+  state.wormCd = [0, 0, 0];
+  state.charge = 0; state.charging = false; state.plungeMin = 9999;
   state.skillTier = 0;
   state.replay = false;
   state.multiball = false;
@@ -994,19 +1016,35 @@ function launch(){
   ac();
   const b = balls[0];
   if (!b) return;
+  const p = Math.max(0.05, Math.min(1, state.charge));
   b.vx = 0;
-  b.vy = -1500;
+  b.vy = -(260 + 1480 * p);
   state.mode = 'play';
   state.skill = true;
+  state.plungeMin = 9999;
+  state.skillTier = 0;
+  state.charge = 0;
   sfx.launch();
   burst(434, 770, C.blue, 10, 160);
+}
+function startCharge(){
+  ac();
+  if (state.screen === 'menu') { restart('classic'); return; }
+  if (state.screen === 'board') { state.screen = state.mode === 'over' ? 'over' : 'menu'; return; }
+  if (state.screen === 'over'){ restart(state.gameMode); return; }
+  if (state.mode === 'ready'){ state.charging = true; state.charge = 0; }
+}
+function releaseCharge(){
+  if (!state.charging) return;
+  state.charging = false;
+  launch();
 }
 function primary(){
   ac();
   if (state.screen === 'menu') { restart('classic'); return; }
   if (state.screen === 'board') { state.screen = state.mode === 'over' ? 'over' : 'menu'; return; }
   if (state.screen === 'over'){ restart(state.gameMode); return; }
-  if (state.mode === 'ready') launch();
+  if (state.mode === 'ready') startCharge();
 }
 function ballLost(){
   // REPLAY (ball save): the original returns the ball rather than consuming it, and
@@ -1055,9 +1093,96 @@ function ballLost(){
 }
 
 /* ---------------------------- per-ball physics ---------------------------- */
+/* Upper deck (the elevated launch ramp). While on it the ball ignores every lower-deck
+   collider and follows the ramp polyline: up the right wall, across the dome arc, down
+   the left wall, then it drops through the hole after a short delay — the same beat the
+   original has when the ball falls from the raised playfield back to the flippers. */
+function rampPoint(s){
+  const L1 = RAMP.y0 - RAMP.y1;                       // right riser
+  const LA = Math.PI * RAMP.r;                        // dome arc (right -> left over top)
+  const L2 = (RAMP.y3 - RAMP.y2);                     // left descent
+  let d = s;
+  if (d < L1) return {x:RAMP.x0, y:RAMP.y0 - d, a:0};
+  d -= L1;
+  if (d < LA){
+    const th = -(d / RAMP.r);                         // 0 -> -PI across the top
+    return {x:RAMP.cx + Math.cos(th) * RAMP.r, y:RAMP.cy + Math.sin(th) * RAMP.r,
+            a:th - Math.PI / 2};
+  }
+  d -= LA;
+  return {x:RAMP.x2, y:RAMP.y2 + d, a:0};
+}
+const RAMP_LEN = (RAMP.y0 - RAMP.y1) + Math.PI * RAMP.r + (RAMP.y3 - RAMP.y2);
+
+/* tangential gravity along the ramp: decelerates up the riser, weightless over the
+   crown, accelerates down the left descent (guide rails keep it on track) */
+function rampAccel(s){
+  const L1 = RAMP.y0 - RAMP.y1;
+  if (s < L1) return -620;
+  const d = s - L1, LA = Math.PI * RAMP.r;
+  if (d < LA){ const th = -(d / RAMP.r); return -620 * Math.cos(th); }
+  return 620;
+}
+
+function stepUpper(b, dt){
+  b.v += rampAccel(b.s) * dt;
+  b.v = Math.max(240, Math.min(1400, b.v));
+  b.s += b.v * dt;
+  const p = rampPoint(Math.min(b.s, RAMP_LEN));
+  b.x = p.x; b.y = p.y;
+  if (b.s >= RAMP_LEN && b.dropT === undefined){
+    b.dropT = 0.55;                                   // hang over the hole, then drop
+    sfx.worm();
+  }
+  if (b.dropT !== undefined){
+    b.dropT -= dt;
+    if (b.dropT <= 0){
+      b.deck = 'lower';
+      b.x = RAMP.drop.x + 6; b.y = RAMP.drop.y + 4;
+      b.vx = 130; b.vy = 240;
+      b.trail.length = 0;
+      burst(RAMP.drop.x, RAMP.drop.y, C.gold, 14, 220);
+      popText(RAMP.drop.x + 30, RAMP.drop.y - 18, 'RE-ENTRY', C.gold);
+      sfx.fuel();
+    }
+  }
+}
+
 function stepBall(b, dt){
+  // swallowed by a wormhole: hidden for a couple of seconds, then spat out of one of
+  // the OTHER chutes (the original's wormhole behaviour)
+  if (b.wormT !== undefined){
+    b.wormT -= dt;
+    if (b.wormT <= 0){
+      let j = b.wormOut;
+      while (j === b.wormOut) j = (Math.random() * WORMS.length) | 0;
+      const w = WORMS[j];
+      state.wormCd[j] = 1.6;
+      b.x = w.x; b.y = w.y - 2;
+      const dir = (w.x < 240) ? 1 : (w.x > 240 ? -1 : (Math.random() < 0.5 ? -1 : 1));
+      b.vx = dir * (190 + Math.random() * 160);
+      b.vy = -(520 + Math.random() * 220);
+      b.wormT = undefined; b.hidden = false;
+      b.wormImm = 1.6;                 // brief immunity so it cannot chain-swallow
+      b.trail.length = 0; b.stuck = 0; b.tries = 0;
+      b.zg = {x:b.x, y:b.y, t:0, n:0}; b.hiT = 0;
+      w.pop = 1;
+      burst(w.x, w.y, w.c, 18, 280);
+      popText(w.x, w.y - 32, 'WARP OUT', w.c);
+      sfx.worm();
+      state.shake = 5;
+    }
+    return;
+  }
+
   b.trail.push({x:b.x, y:b.y});
   if (b.trail.length > 14) b.trail.shift();
+
+  if (b.deck === 'ramp'){
+    state.plungeMin = Math.min(state.plungeMin, b.y);
+    stepUpper(b, dt);
+    return;
+  }
 
   b.vy += GRAV * dt;
   const drag = 1 - 0.10 * dt;
@@ -1155,34 +1280,60 @@ function stepBall(b, dt){
   const sp = Math.sqrt(b.vx*b.vx + b.vy*b.vy);
   if (sp > MAXSPD){ b.vx = b.vx / sp * MAXSPD; b.vy = b.vy / sp * MAXSPD; }
 
-  // wormholes (centre-based trigger with cooldown)
+  // wormholes: swallow the ball, hold it in the chute, then spit it out of one of the
+  // OTHER chutes a couple of seconds later (the original's wormhole behaviour)
+  if (!b.wormImm || b.wormImm <= 0){
   for (let i = 0; i < WORMS.length; i++){
     const w = WORMS[i];
     if (state.wormCd[i] > 0) continue;
     const dx = b.x - w.x, dy = b.y - w.y;
-    if (dx*dx + dy*dy < (w.r * 0.7) * (w.r * 0.7)){
+    const spd2 = b.vx*b.vx + b.vy*b.vy;
+    // a chute swallows a ball that drops in or rolls over it; a fast ball (full plunge,
+    // bumper blast) skips across the opening, so warps stay a choice not a tax
+    if (dx*dx + dy*dy < (w.r * 0.6) * (w.r * 0.6) && spd2 < 620*620){
       state.wormCd[i] = 1.5;
       enterWorm(i);
-      // spit the ball back out toward the centre so it never stops inside
-      b.x = w.x; b.y = w.y - 4;
-      b.vx = (240 - w.x) * 0.9;
-      b.vy = -420;
+      b.wormT = 1.6 + Math.random() * 1.2;
+      b.wormOut = i;
+      b.hidden = true;
+      b.vx = 0; b.vy = 0;
       b.trail.length = 0;
+      popText(w.x, w.y - 30, 'WARP IN', w.c);
       break;
     }
   }
+  }
+  if (b.wormImm > 0) b.wormImm -= dt;
 
-  // SKILL SHOT, tiered like the original (15k / 40k / 75k by how deep the plunge went).
-  if (state.skill){
-    if (b.vy > 0 && b.y < 300 && state.skillTier === 0){
-      state.skillTier = b.y < 120 ? 3 : (b.y < 190 ? 2 : 1);
-    }
-    if (b.y > 300){
-      state.skill = false;
-      if (state.skillTier > 0){
-        const pts = state.skillTier === 3 ? 75000 : (state.skillTier === 2 ? 40000 : 15000);
+  // launch ramp: a hard plunge leaves the lane mouth and climbs the elevated deck
+  if (b.deck === 'lower' && b.x > 412 && b.vy < -RAMP.enterV && b.y < RAMP.y0 + 8){
+    b.deck = 'ramp';
+    b.s = Math.max(0, RAMP.y0 - b.y);
+    b.v = -b.vy;
+    b.dropT = undefined;
+    state.skill = false;
+    if (state.mission) state.mission.fuel = FUEL_N;   // ramp ride relights all fuel
+    addScore(500, b.x, b.y - 20, C.gold);
+    state.banner = {t:1.2, text:'LAUNCH RAMP', sub:'高架坡道 · 燃料补满'};
+    sfx.launch();
+    burst(b.x, b.y, C.gold, 12, 220);
+  }
+
+  // SKILL SHOT: six arch lights in the chute. A soft plunge that falls back onto the
+  // 1st..6th light pays 15k/30k/75k/30k/15k/7.5k like the original; a full-power launch
+  // leaves the lane for the ramp instead and scores nothing here.
+  if (state.skill && b.deck === 'lower'){
+    if (b.x > 412 && b.vy < 0) state.plungeMin = Math.min(state.plungeMin, b.y);
+    if (b.x > 412 && b.vy > 0 && state.skillTier === 0 && state.plungeMin < 9000){
+      const a = state.plungeMin;
+      // six arch lights at y 704/658/612/566/520/474; the deepest light the plunge
+      // reached pays 15k/30k/75k/30k/15k/7.5k like the original
+      const pts = a <= 474 ? 7500 : a <= 520 ? 15000 : a <= 566 ? 30000
+                : a <= 612 ? 75000 : a <= 658 ? 30000 : a <= 704 ? 15000 : 0;
+      if (pts > 0){
+        state.skillTier = 1;
         addScore(pts, b.x, b.y - 20, C.gold);
-        if (state.skillTier === 3){
+        if (pts === 75000){
           state.banner = {t:1.6, text:'PERFECT SKILL SHOT', sub:'+75000'};
           state.shake = 8;
         } else {
@@ -1191,8 +1342,10 @@ function stepBall(b, dt){
         state.flash = 0.5;
         sfx.fuel();
       }
-      state.skillTier = 0;
+      state.skill = false;
     }
+    // the window only closes early if the ball somehow leaves the chute into the table
+    if (b.x < 410 && b.y > 300){ state.skill = false; }
   }
 
   // three rollover lamps: passing over one lights it; all three light the bumpers.
@@ -1221,12 +1374,12 @@ function stepBall(b, dt){
 // just sat there and expired. Reaching the upper half of the table counts as "going up
 // the ramp", which is the intent (you commit by sending the ball back up).
   if (state.selected >= 0 && !state.mission && state.selectedAt > 0 &&
-      state.selectedAt < state.time - 0.8 && b.y < 380){
+      state.selectedAt < state.time - 0.8 && (b.y < 380 || b.deck === 'ramp')){
     if (startMission()) state.shake = 8;
   }
 
-  // fuel rollovers inside the lane
-  if (b.x > 412 && b.vy < 0 && b.y > 380 && b.y < 730){
+  // fuel rollovers inside the lane (lower deck only; the ramp ride refuels on entry)
+  if (b.deck === 'lower' && b.x > 412 && b.vy < 0 && b.y > 380 && b.y < 730){
     if (state.mission && state.mission.fuel < FUEL_N){
       state.mission.fuel = FUEL_N;
       sfx.fuel();
@@ -1319,7 +1472,10 @@ function update(dt){
   if (state.banner){ state.banner.t -= dt; if (state.banner.t <= 0) state.banner = null; }
   if (state.tilt > 0) state.tilt = Math.max(0, state.tilt - dt);
   state.nudge = Math.max(0, state.nudge - dt * 0.55);
-  for (let i = 0; i < 2; i++) state.wormCd[i] = Math.max(0, state.wormCd[i] - dt);
+  for (let i = 0; i < WORMS.length; i++) state.wormCd[i] = Math.max(0, state.wormCd[i] - dt);
+
+  // plunger charge builds while held (space / touch)
+  if (state.charging && state.mode === 'ready') state.charge = Math.min(1, state.charge + dt / 1.15);
 
   // combo window decays; running out drops the stack (not the multiplier)
   if (state.comboT > 0){
@@ -2030,6 +2186,74 @@ function drawRankRing(){
   ctx.restore();
 }
 
+/* Elevated launch ramp (upper deck). Drawn as a raised track with a drop shadow so it
+   reads as a bridge above the playfield, like the original's raised playfield. */
+function drawRamp(){
+  ctx.save();
+  ctx.lineCap = 'round';
+
+  // shadow pass, offset down-right, sells the elevation
+  ctx.strokeStyle = 'rgba(0,0,0,.42)';
+  ctx.lineWidth = 15;
+  rampPath(7, 11);
+  ctx.stroke();
+
+  // deck base
+  ctx.strokeStyle = 'rgba(20,28,58,.85)';
+  ctx.lineWidth = 15;
+  rampPath(0, 0);
+  ctx.stroke();
+
+  // sleepers
+  ctx.strokeStyle = 'rgba(255,212,94,.16)';
+  ctx.lineWidth = 2;
+  for (let s = 0; s < RAMP_LEN; s += 26){
+    const p = rampPoint(s);
+    const nx = Math.cos(p.a), ny = Math.sin(p.a);
+    ctx.beginPath();
+    ctx.moveTo(p.x - nx * 6, p.y - ny * 6);
+    ctx.lineTo(p.x + nx * 6, p.y + ny * 6);
+    ctx.stroke();
+  }
+
+  // rails
+  ctx.strokeStyle = 'rgba(255,212,94,.5)';
+  ctx.lineWidth = 1.6;
+  ctx.shadowColor = 'rgba(255,212,94,.55)';
+  ctx.shadowBlur = 8;
+  rampPath(0, 0, 6);
+  ctx.stroke();
+  rampPath(0, 0, -6);
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // drop hole back to the lower deck
+  const d = RAMP.drop;
+  ctx.fillStyle = 'rgba(2,4,12,.95)';
+  ctx.beginPath(); ctx.arc(d.x, d.y, 12, 0, 6.2832); ctx.fill();
+  ctx.strokeStyle = C.gold;
+  ctx.lineWidth = 1.6;
+  ctx.shadowColor = C.gold; ctx.shadowBlur = 10;
+  ctx.beginPath(); ctx.arc(d.x, d.y, 12, 0, 6.2832); ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.font = '600 7px ui-monospace,Menlo,monospace';
+  ctx.fillStyle = 'rgba(255,212,94,.6)';
+  ctx.textAlign = 'left';
+  ctx.fillText('RE-ENTRY', d.x + 16, d.y + 2);
+  ctx.restore();
+}
+function rampPath(ox, oy, off){
+  off = off || 0;
+  ctx.beginPath();
+  // right riser (inside the shooter lane)
+  ctx.moveTo(RAMP.x0 + off + ox, RAMP.y0 + oy);
+  ctx.lineTo(RAMP.x1 + off + ox, RAMP.y1 + oy);
+  // dome arc, right -> top -> left (rails are concentric, offset changes the radius)
+  ctx.arc(RAMP.cx + ox, RAMP.cy + oy, RAMP.r + off, 0, -Math.PI, true);
+  // left descent to the drop hole
+  ctx.lineTo(RAMP.x3 - off + ox, RAMP.y3 + oy);
+}
+
 function drawWorms(){
   for (let i = 0; i < WORMS.length; i++){
     const w = WORMS[i];
@@ -2082,6 +2306,23 @@ function drawWorms(){
       ctx.lineWidth = 1.2;
       ctx.beginPath(); ctx.arc(w.x, w.y, w.r + 5, 0, 6.2832); ctx.stroke();
       ctx.globalAlpha = 1;
+    }
+
+    // a ball currently swallowed by this chute: swirl faster + countdown ring
+    for (let k = 0; k < balls.length; k++){
+      const bb = balls[k];
+      if (bb.hidden && bb.wormOut === i){
+        const frac = 1 - Math.max(0, bb.wormT) / 2.8;
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 2.4;
+        ctx.beginPath();
+        ctx.arc(w.x, w.y, w.r + 8, -Math.PI / 2, -Math.PI / 2 + frac * 6.2832);
+        ctx.stroke();
+        ctx.font = '700 9px ui-monospace,Menlo,monospace';
+        ctx.fillStyle = w.c;
+        ctx.textAlign = 'center';
+        ctx.fillText('WARP', w.x, w.y + w.r + 20);
+      }
     }
     ctx.restore();
   }
@@ -2208,7 +2449,21 @@ function drawBallOne(b){
 }
 
 function drawBalls(){
-  for (let i = 0; i < balls.length; i++) drawBallOne(balls[i]);
+  for (let i = 0; i < balls.length; i++){
+    const b = balls[i];
+    if (b.hidden) continue;                      // swallowed by a wormhole
+    if (b.deck === 'ramp'){
+      // drop shadow on the lower deck sells the elevation
+      ctx.save();
+      ctx.globalAlpha = 0.38;
+      ctx.fillStyle = '#000';
+      ctx.beginPath();
+      ctx.ellipse(b.x + 7, b.y + 13, b.r * 0.95, b.r * 0.62, 0, 0, 6.2832);
+      ctx.fill();
+      ctx.restore();
+    }
+    drawBallOne(b);
+  }
 }
 
 function drawPlunger(){
@@ -2546,8 +2801,38 @@ function drawOverlays(){
     ctx.font = '700 12px ui-monospace,Menlo,monospace';
     ctx.letterSpacing = '1.5px';
     ctx.fillStyle = 'rgba(175,220,255,' + (0.6 + pulse * 0.4) + ')';
-    ctx.fillText('空格 / 点击 发射', 241, py + ph / 2 + 1);
+    ctx.fillText(state.charging ? '蓄力中… 松开发射' : '按住 空格/屏幕 蓄力', 241, py + ph / 2 + 1);
     ctx.letterSpacing = '0px';
+    ctx.globalAlpha = 1;
+
+    // plunger charge meter (six arch lights, like the original's skill-shot chute)
+    if (state.charging || state.charge > 0){
+      const cw = 200, cx0 = 240 - cw / 2, cy0 = 706;
+      ctx.fillStyle = 'rgba(6,10,26,.85)';
+      rr(cx0 - 4, cy0 - 7, cw + 8, 14, 7);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,212,94,.35)';
+      ctx.lineWidth = 1;
+      rr(cx0 - 4, cy0 - 7, cw + 8, 14, 7);
+      ctx.stroke();
+      const w = cw * state.charge;
+      const grad = ctx.createLinearGradient(cx0, 0, cx0 + cw, 0);
+      grad.addColorStop(0, C.cyan);
+      grad.addColorStop(0.55, C.gold);
+      grad.addColorStop(0.8, C.orange);
+      grad.addColorStop(1, C.magenta);
+      ctx.fillStyle = grad;
+      if (w > 2){ rr(cx0, cy0 - 4, w, 8, 4); ctx.fill(); }
+      // arch-light ticks
+      ctx.strokeStyle = 'rgba(255,255,255,.4)';
+      for (let k = 1; k < 6; k++){
+        const tx = cx0 + cw * k / 6;
+        ctx.beginPath(); ctx.moveTo(tx, cy0 - 6); ctx.lineTo(tx, cy0 + 6); ctx.stroke();
+      }
+      ctx.font = '600 8px ui-monospace,Menlo,monospace';
+      ctx.fillStyle = 'rgba(255,212,94,.75)';
+      ctx.fillText(state.charge > 0.86 ? '满力 → 上高架坡道' : '力度 ' + Math.round(state.charge * 100) + '%', 240, cy0 + 16);
+    }
     ctx.restore();
   }
 
@@ -2599,6 +2884,7 @@ function render(){
   drawDrainZone();
   drawPlunger();
   drawWalls();
+  drawRamp();
   drawRankRing();
   drawWorms();
   drawFuelLights();
@@ -2714,7 +3000,7 @@ function onKey(e, down){
     setFlipper(rightF, down);
     e.preventDefault();
   } else if (k === ' ' || k === 'spacebar' || k === 'enter'){
-    if (down) primary();
+    if (down) primary(); else releaseCharge();
     e.preventDefault();
   } else if (k === 'n' && down){
     nudge(-1);
@@ -2752,7 +3038,7 @@ function pointerDown(e){
     return;
   }
 
-  if (state.mode === 'ready') { primary(); return; }
+  if (state.mode === 'ready') { startCharge(); return; }
   const side = x < CW / 2 ? 'L' : 'R';
   pointerSide.set(e.pointerId, side);
   if (side === 'L') setFlipper(leftF, true); else setFlipper(rightF, true);
@@ -2766,6 +3052,7 @@ function hitButton(x, y){
   return null;
 }
 function pointerUp(e){
+  if (state.charging){ releaseCharge(); pointerSide.delete(e.pointerId); return; }
   const side = pointerSide.get(e.pointerId);
   if (!side) return;
   pointerSide.delete(e.pointerId);
@@ -2796,9 +3083,12 @@ window.__PS = {
   state: state, balls: balls, leftF: leftF, rightF: rightF,
   PF: PF,
   BUMPERS: BUMPERS, POSTS: POSTS, SLINGS: SLINGS, WALLS: WALLS,
-  MISSION_TARGETS: MISSION_TARGETS, WORMS: WORMS, RING_POS: RING_POS,
+  MISSION_TARGETS: MISSION_TARGETS, WORMS: WORMS, RING_POS: RING_POS, RAMP: RAMP,
   FUEL_POS: FUEL_POS, GATE: GATE, RANKS: RANKS, MISSIONS: MISSIONS,
   launch: launch, restart: restart, update: update, primary: primary,
+  startCharge: startCharge, releaseCharge: releaseCharge,
+  rampPoint: rampPoint, stepUpper: stepUpper,
+  swallow: function(b, i){ b.wormT = 2.0; b.wormOut = i; b.hidden = true; b.vx = 0; b.vy = 0; },
   ballLost: ballLost, addScore: addScore, spawnBall: spawnBall,
   selectMission: selectMission, startMission: startMission,
   missionSlots: missionSlots, completeMission: completeMission,
