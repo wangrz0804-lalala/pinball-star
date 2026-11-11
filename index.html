@@ -263,34 +263,42 @@ const state = {
 
 /* ---------------------------- missions ---------------------------- */
 /* Named missions with sequential stages, like the original table ("some missions
-   involve a number of steps which must be completed in sequence"). A mission is a list
-   of stages; only the current stage listens for events, so order is enforced.
-   Goals were measured against a real play loop (a goal of 8 bumpers never finished
-   before fuel ran out at the old 5s/light), so stage goals stay at 2-5. */
+   involve a number of steps which must be completed in sequence"). Every stage names
+   the exact spot to hit (see SPOTS), so the player always knows where to aim; the HUD
+   pulses a marker on that spot while the stage is live. */
 const MISSIONS = [
   {id:'launch', name:'LAUNCH TRAINING', zh:'发射训练', bonus:8000,
-   stages:[{kind:'bumper', goal:2, zh:'击中缓冲器'}]},
+   stages:[{kind:'b0', goal:2, spot:'b0', zh:'击打 日核缓冲器 ×2'}]},
 
   {id:'target', name:'TARGET PRACTICE', zh:'打靶训练', bonus:12000,
-   stages:[{kind:'bumper', goal:3, zh:'击中缓冲器'},
-           {kind:'post',   goal:2, zh:'击中目标柱'}]},
+   stages:[{kind:'b1',  goal:2, spot:'b1', zh:'击打 冰环缓冲器 ×2'},
+           {kind:'posts', goal:2, spot:'posts', zh:'点亮 左右翼柱 各一次'}]},
 
   {id:'sling', name:'SLINGSHOT DRILL', zh:'弹射器操练', bonus:12000,
-   stages:[{kind:'sling', goal:3, zh:'击中弹射器'},
-           {kind:'worm',  goal:1, zh:'进入虫洞'}]},
+   stages:[{kind:'s0', goal:2, spot:'s0', zh:'击打 左弹射器 ×2'},
+           {kind:'s1', goal:2, spot:'s1', zh:'击打 右弹射器 ×2'}]},
+
+  {id:'recon', name:'WORMHOLE RECON', zh:'虫洞侦察', bonus:16000,
+   stages:[{kind:'w0', goal:1, spot:'w0', zh:'送入 蓝洞·天鹅座'},
+           {kind:'w1', goal:1, spot:'w1', zh:'送入 紫洞·天蝎座'}]},
 
   {id:'rescue', name:'RESCUE MISSION', zh:'营救任务', bonus:20000,
-   stages:[{kind:'left',   goal:1, zh:'击打左目标'},
-           {kind:'right',  goal:1, zh:'击打右目标'},
-           {kind:'bumper', goal:2, zh:'返航缓冲器'}]},
+   stages:[{kind:'p0', goal:1, spot:'p0', zh:'击打 左翼目标柱'},
+           {kind:'p1', goal:1, spot:'p1', zh:'击打 右翼目标柱'},
+           {kind:'b2', goal:2, spot:'b2', zh:'返航 星云缓冲器 ×2'}]},
 
   {id:'radiation', name:'SPACE RADIATION', zh:'太空辐射', bonus:18000,
-   stages:[{kind:'worm',  goal:1, zh:'进入虫洞'},
-           {kind:'sling', goal:2, zh:'击中弹射器'}]},
+   stages:[{kind:'w2', goal:1, spot:'w2', zh:'送入 金洞·人马座'},
+           {kind:'sling', goal:2, spot:'s0', zh:'击打 任一弹射器 ×2'}]},
+
+  {id:'patrol', name:'STAR PATROL', zh:'三星巡逻', bonus:22000,
+   stages:[{kind:'b0', goal:1, spot:'b0', zh:'巡逻 日核缓冲器'},
+           {kind:'b1', goal:1, spot:'b1', zh:'巡逻 冰环缓冲器'},
+           {kind:'b2', goal:1, spot:'b2', zh:'巡逻 星云缓冲器'}]},
 
   {id:'warp', name:'TIME WARP', zh:'时间跃迁', bonus:30000,
-   stages:[{kind:'bumper', goal:5, zh:'击中缓冲器'},
-           {kind:'lane',   goal:1, zh:'回到发射坡道'}]}
+   stages:[{kind:'bumper', goal:4, spot:'b0', zh:'击打 任一缓冲器 ×4'},
+           {kind:'lane',   goal:1, spot:'ramp', zh:'满力发射 回到高架坡道'}]}
 ];
 
 const FUEL_SEC = 9;   // seconds per fuel light
@@ -445,6 +453,30 @@ const RAMP = {
 const FUEL_N = 6;
 const FUEL_POS = [];
 for (let i = 0; i < FUEL_N; i++) FUEL_POS.push({x:434, y:704 - i * 46});
+
+/* ---------------------------- named spots ---------------------------- */
+/* Every hittable thing on the table has a name, so missions can say "hit the Sol
+   bumper" instead of "hit a bumper" and the HUD can point at a real place. */
+const SPOTS = {};
+function spot(id, x, y, name){ SPOTS[id] = {x:x, y:y, name:name}; }
+BUMPERS.forEach(function(b, i){
+  spot('b' + i, b.x, b.y, ['日核缓冲器', '冰环缓冲器', '星云缓冲器'][i]);
+});
+SLINGS.forEach(function(s, i){
+  spot('s' + i, (s.x1 + s.x2) / 2, (s.y1 + s.y2) / 2, i ? '右弹射器' : '左弹射器');
+});
+POSTS.forEach(function(p, i){
+  spot('p' + i, p.x, p.y, i ? '右翼目标柱' : '左翼目标柱');
+});
+WORMS.forEach(function(w, i){
+  spot('w' + i, w.x, w.y, ['蓝洞·天鹅座', '紫洞·天蝎座', '金洞·人马座'][i]);
+});
+spot('ramp', RAMP.cx, RAMP.cy - RAMP.r, '发射坡道(高架)');
+LANE_LAMPS.forEach(function(l, i){
+  spot('l' + i, l.x, l.y, ['左星道', '中星道', '右星道'][i]);
+});
+spot('shooter', 434, 700, '发射槽');
+spot('posts', 240, 474, '两侧翼柱');
 
 /* ---------------------------- flippers ---------------------------- */
 function Flipper(px, py, len, rest, active){
@@ -621,11 +653,19 @@ function stageNow(){
   return m.def.stages[m.stage] || null;
 }
 
-/* An event fired. Only the CURRENT stage listens, which is what makes stages ordered. */
+/* An event fired. Only the CURRENT stage listens, which is what makes stages ordered.
+   Group kinds (bumper / sling / posts) accept any member spot. */
+function kindMatch(stageKind, fired){
+  if (stageKind === fired) return true;
+  if (stageKind === 'bumper') return fired === 'b0' || fired === 'b1' || fired === 'b2';
+  if (stageKind === 'sling')  return fired === 's0' || fired === 's1';
+  if (stageKind === 'posts')  return fired === 'p0' || fired === 'p1';
+  return false;
+}
 function missionProgress(kind, amount){
   const m = state.mission;
   const st = stageNow();
-  if (!m || !st || st.kind !== kind) return;
+  if (!m || !st || !kindMatch(st.kind, kind)) return;
   m.prog += (amount === undefined ? 1 : amount);
   if (m.prog >= st.goal) advanceStage();
 }
@@ -823,7 +863,7 @@ function enterWorm(i){
   burst(w.x, w.y, w.c, 16, 260);
   sfx.worm();
   state.shake = 6;
-  missionProgress('worm', 1);
+  missionProgress('w' + i, 1);
 
   if (state.wormArmed === -1){
     state.wormArmed = i;                       // first lock: this colour is armed
@@ -1207,7 +1247,7 @@ function stepBall(b, dt){
         burst(hit.px, hit.py, C.violet, 9, 250);
         state.shake = 4;
         sfx.sling();
-        missionProgress('sling', 1);
+        missionProgress('s' + i, 1);
       }
     }
     for (let i = 0; i < BUMPERS.length; i++){
@@ -1224,7 +1264,7 @@ function stepBall(b, dt){
         burst(hit.px, hit.py, bp.c, 12, 300);
         state.shake = 6;
         sfx.bumper(i);
-        missionProgress('bumper', 1);
+        missionProgress('b' + i, 1);
       }
     }
     for (let i = 0; i < POSTS.length; i++){
@@ -1237,9 +1277,7 @@ function stepBall(b, dt){
         addScore(60, tg.x, tg.y - tg.r - 8, tg.c);
         burst(hit.px, hit.py, tg.c, 7, 190);
         sfx.sling();
-        missionProgress('post', 1);
-        // rescue-mission stages name a side explicitly
-        missionProgress(i === 0 ? 'left' : 'right', 1);
+        missionProgress('p' + i, 1);
       }
     }
     for (let i = 0; i < MISSION_TARGETS.length; i++){
@@ -1313,6 +1351,7 @@ function stepBall(b, dt){
     b.dropT = undefined;
     state.skill = false;
     if (state.mission) state.mission.fuel = FUEL_N;   // ramp ride relights all fuel
+    missionProgress('lane', 1);
     addScore(500, b.x, b.y - 20, C.gold);
     state.banner = {t:1.2, text:'LAUNCH RAMP', sub:'高架坡道 · 燃料补满'};
     sfx.launch();
@@ -1360,11 +1399,8 @@ function stepBall(b, dt){
     if (ldx * ldx + ldy * ldy < 30 * 30) hitLane(i);
   }
 
-  // "lane" stage (time warp): send the ball back up the shooter lane to finish
-  {
-    const st = stageNow();
-    if (st && st.kind === 'lane' && b.x > 412 && b.y < 700) missionProgress('lane', 1);
-  }
+  // "lane" stage (time warp) completes at the ramp entrance (full-power plunge),
+  // fired where the ramp is entered so a weak lob cannot finish it.
 
   // launch-ramp = mission start. "Going up the ramp" is modelled as the ball reaching
 // the upper arc after a mission has been selected, because in normal play the ball
@@ -2095,14 +2131,74 @@ function drawMissionTargets(){
     if (def){
       const ix = t.x + (240 - t.x) * 0.20;
       const iy = t.y + (300 - t.y) * 0.20;
-      ctx.globalAlpha = (sel || run) ? 1 : 0.6;
+      ctx.globalAlpha = (sel || run) ? 1 : 0.62;
       ctx.font = '700 8px ui-monospace,Menlo,monospace';
       ctx.fillStyle = t.c;
-      ctx.fillText(def.id.toUpperCase(), ix, iy);
+      ctx.fillText(def.zh, ix, iy);
     }
     ctx.globalAlpha = 1;
     ctx.restore();
   }
+}
+
+/* While a mission stage is live, pulse a marker + name on the exact spot to hit, so
+   the player never has to guess where "stage 2" lives. */
+function drawSpotNames(){
+  ctx.save();
+  ctx.font = '600 7px ui-monospace,Menlo,monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const put = function(id, dx, dy, alpha){
+    const s = SPOTS[id];
+    if (!s) return;
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = 'rgba(160,195,240,.9)';
+    ctx.fillText(s.name, s.x + dx, s.y + dy);
+  };
+  put('b0', 0, 40, 0.55);
+  put('b1', 0, 40, 0.55);
+  put('b2', 0, 40, 0.55);
+  put('s0', -2, 26, 0.5);
+  put('s1', 2, 26, 0.5);
+  put('p0', 0, 22, 0.5);
+  put('p1', 0, 22, 0.5);
+  put('w0', 0, -26, 0.6);
+  put('w1', 0, -26, 0.6);
+  put('w2', 0, -26, 0.6);
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+function drawSpotMarker(){
+  const st = stageNow();
+  if (!st || !st.spot || !SPOTS[st.spot]) return;
+  const s = SPOTS[st.spot];
+  const pulse = 0.5 + 0.5 * Math.sin(state.time * 6);
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,255,255,' + (0.35 + pulse * 0.5) + ')';
+  ctx.lineWidth = 1.6;
+  ctx.setLineDash([5, 4]);
+  ctx.lineDashOffset = -state.time * 26;
+  ctx.beginPath();
+  ctx.arc(s.x, s.y, 26 + pulse * 5, 0, 6.2832);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  // name tag with a backing plate so it reads over any backdrop
+  ctx.font = '700 9px ui-monospace,Menlo,monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const tw = ctx.measureText(s.name).width + 10;
+  const ty = s.y - 38;
+  ctx.fillStyle = 'rgba(4,8,20,.82)';
+  rr(s.x - tw / 2, ty - 8, tw, 16, 5);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,.35)';
+  ctx.lineWidth = 1;
+  rr(s.x - tw / 2, ty - 8, tw, 16, 5);
+  ctx.stroke();
+  ctx.fillStyle = '#fff';
+  ctx.fillText(s.name, s.x, ty + 0.5);
+  ctx.restore();
 }
 
 function drawPosts(){
@@ -2893,7 +2989,9 @@ function render(){
   drawLaneLamps();
   drawMissionTargets();
   drawBumpers();
+  drawSpotNames();
   drawFlippers();
+  drawSpotMarker();
   drawBalls();
 
   for (let i = 0; i < parts.length; i++){
@@ -3084,6 +3182,7 @@ window.__PS = {
   PF: PF,
   BUMPERS: BUMPERS, POSTS: POSTS, SLINGS: SLINGS, WALLS: WALLS,
   MISSION_TARGETS: MISSION_TARGETS, WORMS: WORMS, RING_POS: RING_POS, RAMP: RAMP,
+  SPOTS: SPOTS, stageNow: stageNow,
   FUEL_POS: FUEL_POS, GATE: GATE, RANKS: RANKS, MISSIONS: MISSIONS,
   launch: launch, restart: restart, update: update, primary: primary,
   startCharge: startCharge, releaseCharge: releaseCharge,
