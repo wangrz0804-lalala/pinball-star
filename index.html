@@ -577,9 +577,10 @@ const SLINGS = [
 
 const BUMPERS = [
   {x:240, y:226, r:24, c:C.gold,    pop:0, hits:0},
-  {x:196, y:296, r:24, c:C.cyan,    pop:0, hits:0},
+  {x:212, y:288, r:24, c:C.cyan,    pop:0, hits:0},
   {x:284, y:296, r:24, c:C.magenta, pop:0, hits:0}
-];   // 紧凑正三角：上部成簇（原版构图：上密、中疏、下对称）
+];   // 紧凑正三角：上部成簇（原版构图：上密、中疏、下对称）。
+     // 冰环右移让出坡道桥身与入口喇叭（ub7），不再被桥遮挡。
 const BUMPER_HITS_PER_STAR = 3;
 
 /* Mission targets and lane lamps are ROLLOVERS: pure sensors the ball rolls over, with
@@ -724,22 +725,22 @@ function smoothPath(pts, sub){
 }
 
 const RAMP = {
-  // 坡道口（喇叭吞球口）：左中区——冰环缓冲器与天鹅座虫洞之间的空档（原版位）。
-  // 球从挡板沿二层右侧引导通道一记上撩滚入。
-  x:182, y:360, r:15,
-  sx0:166, sx1:198, sy0:336, sy1:384,    // 吞球传感器区域（冰环下沿与天鹅座上沿之间）
+  // 坡道口（喇叭吞球口）：左中区偏下——冰环缓冲器与天鹅座虫洞之间、军衔环左上缘之外。
+  // ub7：入口下移右移让开冰环；与环心(240,470)保持 >100 安全距离。
+  x:198, y:374, r:15,
+  sx0:182, sx1:214, sy0:350, sy1:398,    // 吞球传感器区域
   enterVy:-250,                          // 需要一定上行速度（一记"上撩"）
   tx:96+DX, ty:155+DY,                   // 交付点：中轴二层顶部交付口（过渡区入口）
   cd:0,
-  // 坡道中心线：入口贴二层右缘上行 → 绕过二层右上角 → 并入二层顶面交付口。
-  // 末段控制点落在二层轮廓内，桥体与二层读作同一个组件（交接处画衔接口）。
+  // 坡道中心线：入口贴二层右缘上行 → 绕过二层右上角 → 末段顺圆顶肩线滑进交付口
+  // （末两个控制点贴着圆顶坡度，桥尾与二层顶面切向连续，衔接更顺）。
   path: smoothPath([
-    {x:182, y:360},
-    {x:178, y:336},
-    {x:166, y:318},
-    {x:146, y:310},
-    {x:120, y:316},
-    {x:100, y:326},
+    {x:198, y:374},
+    {x:192, y:348},
+    {x:178, y:328},
+    {x:156, y:316},
+    {x:128, y:314},
+    {x:106, y:320},
     {x:96+DX,  y:155+DY}   // 交付口落点（过渡区顶）
   ], 6),
     rideT:1.0                              // 滑行时长：短桥但要读得出"球在滑"
@@ -4578,7 +4579,7 @@ function rampPoint(t){
    配合桥墩与地面投影，是读作 3D 架空桥的核心。 */
 function rampH(t){
   t = Math.max(0, Math.min(1, t));
-  return DECK3D.z * (1 - Math.pow(1 - t, 2.2));
+  return DECK3D.z * (1 - Math.pow(1 - t, 2.8));   // 2.8：更早饱和到二层高度，桥尾与顶面平齐滑行再融入
 }
 /* 取坡道在 t 处的切向与法向（屏幕坐标，含架空抬升 lift） */
 function rampFrame(t){
@@ -4625,30 +4626,6 @@ function rampGroundRibbon(wfn, t0, t1){
   ctx.closePath();
 }
 
-/* 顶部弯道的原版紫白条纹拱罩（Launch Ramp 标志）：半圆拱带横跨滑道，球自拱下钻过。 */
-function drawRampHood(t){
-  const f = rampFrame(t), ang = Math.atan2(f.dy, f.dx), hw = rampHalfW(t);
-  ctx.save();
-  ctx.translate(f.x, f.y);
-  ctx.rotate(ang);
-  const rin = hw - 1, rout = hw + 12, SEG = 12;
-  for (let i = 0; i < SEG; i++){
-    const a0 = Math.PI + Math.PI * i / SEG;
-    const a1 = Math.PI + Math.PI * (i + 1) / SEG;
-    ctx.beginPath();
-    ctx.arc(0, 0, rout, a0, a1);
-    ctx.arc(0, 0, rin, a1, a0, true);
-    ctx.closePath();
-    ctx.fillStyle = i % 2 === 0 ? 'rgba(150,110,220,.9)' : 'rgba(236,232,248,.95)';
-    ctx.fill();
-  }
-  ctx.strokeStyle = 'rgba(200,182,255,.8)'; ctx.lineWidth = 1.6;
-  ctx.beginPath(); ctx.arc(0, 0, rout, Math.PI, 6.2832); ctx.stroke();
-  ctx.strokeStyle = 'rgba(120,86,190,.6)'; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.arc(0, 0, rin, Math.PI, 6.2832); ctx.stroke();
-  ctx.restore();
-}
-
 function drawLift(){
   const R = RAMP;
   const hot = R.cd <= 0;
@@ -4665,7 +4642,7 @@ function drawLift(){
   ctx.restore();
 
   // —— ② 金属桥墩：只立在开放台面上的前段；后段焊在二层侧缘（见②b），桥与二层是一体结构 ——
-  const piers = [0.10, 0.26];
+  const piers = [0.10, 0.26, 0.42];
   for (const t of piers){
     const f = rampFrame(t), g = rampPoint(t);
     const topY = f.y + 2, footY = g.y + 3;
@@ -4693,7 +4670,7 @@ function drawLift(){
   // —— ②b 与二层的焊接加劲板：把桥身左轨接到二层顶面右缘，读作同一组件 ——
   //    后段桥身落在二层顶面上：落地点画垂直落脚法兰（桥面→顶面的短立柱），
   //    桥与二层之间不留缝，读作从二层长出来的一个组件。
-  for (const t of [0.55, 0.70, 0.85]){
+  for (const t of [0.62, 0.78]){
     const f = rampFrame(t), hw = rampHalfW(t);
     const drop = (DECK3D.z - rampH(t)) + 3;      // 桥面到二层顶面的高差
     if (drop < 2) continue;
@@ -4707,6 +4684,27 @@ function drawLift(){
       rr(lx - 3, f.y + drop - 1.5, 6, 3, 1.5); ctx.fill();
     }
   }
+
+  // —— ②c 与二层顶面的融合围裙：桥尾段铺一块甲板材质的宽板盖住圆顶肩线，
+  //    桥面→围裙→二层顶面同材质过渡，消掉"桥搭在板上"的接缝感（垫在槽底/导轨之下） ——
+  ctx.save();
+  const A0 = 0.70, AN = 24;
+  ctx.beginPath();
+  for (let k = 0; k <= AN; k++){
+    const t = A0 + (1 - A0) * k / AN, f = rampFrame(t), w = rampHalfW(t) + 6;
+    const x = f.x + f.nx * w, y = f.y + f.ny * w;
+    if (k === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  for (let k = AN; k >= 0; k--){
+    const t = A0 + (1 - A0) * k / AN, f = rampFrame(t), w = rampHalfW(t) + 6;
+    ctx.lineTo(f.x - f.nx * w, f.y - f.ny * w);
+  }
+  ctx.closePath();
+  const ag = ctx.createLinearGradient(0, rampFrame(0.85).y - 10, 0, rampFrame(0.85).y + 12);
+  ag.addColorStop(0, '#2b3c63'); ag.addColorStop(0.5, '#22304e'); ag.addColorStop(1, '#141d33');
+  ctx.fillStyle = ag; ctx.fill();
+  ctx.strokeStyle = 'rgba(150,185,245,.25)'; ctx.lineWidth = 1; ctx.stroke();
+  ctx.restore();
 
   // —— ③ 半透明滑道槽：球在槽内可见，保留架空通透感（加深以读作实体槽底） ——
   rampRibbon(function(t){ return rampHalfW(t); });
@@ -4788,10 +4786,7 @@ function drawLift(){
     ctx.stroke();
   }
 
-  // —— ⑦ 顶部弯道：原版紫白条纹拱罩（位于拱顶而非入口）——
-  drawRampHood(0.5);
-
-  // —— ⑧ 简洁金属导流入口：导流翼 + 吞球暗腔 + 发光环 + 箭头 ——
+  // —— ⑦ 简洁金属导流入口：导流翼 + 吞球暗腔 + 发光环 + 箭头 ——
   const inT = rampFrame(0);
   const ang = Math.atan2(inT.dy, inT.dx);
   ctx.save();
@@ -6436,8 +6431,8 @@ if (location.hash === '#regress'){
   var b = balls[0];
   if (b){
     b.hidden = false; b.deck = 'lower'; b.rampT = undefined;
-    // 从新入口(182,360)下方一记高速上撩穿过传感器区（模拟左挡板上撩引导通道）
-    b.x = 182; b.y = 392; b.vx = 0; b.vy = -520; b.trail.length = 0;
+    // 从新入口(198,374)下方一记高速上撩穿过传感器区（模拟左挡板上撩引导通道）
+    b.x = 198; b.y = 406; b.vx = 0; b.vy = -520; b.trail.length = 0;
     var i;
     for (i = 0; i < 600 && !R.captured; i++){ update(1/60); R.frames++; if (b.rampT !== undefined) R.captured = true; }
     for (i = 0; i < 600 && !R.reachedUpper; i++){ update(1/60); R.frames++; if (b.deck === 'upper') R.reachedUpper = true; }
