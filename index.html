@@ -576,11 +576,11 @@ const SLINGS = [
 ];   // 严格镜像（480-x、同高）
 
 const BUMPERS = [
-  {x:240, y:226, r:24, c:C.gold,    pop:0, hits:0},
-  {x:212, y:288, r:24, c:C.cyan,    pop:0, hits:0},
-  {x:284, y:296, r:24, c:C.magenta, pop:0, hits:0}
-];   // 紧凑正三角：上部成簇（原版构图：上密、中疏、下对称）。
-     // 冰环右移让出坡道桥身与入口喇叭（ub7），不再被桥遮挡。
+  {x:240, y:200, r:24, c:C.gold,    pop:0, hits:0},
+  {x:204, y:258, r:24, c:C.cyan,    pop:0, hits:0},
+  {x:276, y:258, r:24, c:C.magenta, pop:0, hits:0}
+];   // ub8 重构排布：关于中轴 x=240 严格镜像的窄正三角，整体上移到桥带与二层顶面之上
+     // （底边 y282 距桥带顶 ≥25、左缘 x180 距二层 ≥36），坡道保留且不再遮挡任何缓冲器。
 const BUMPER_HITS_PER_STAR = 3;
 
 /* Mission targets and lane lamps are ROLLOVERS: pure sensors the ball rolls over, with
