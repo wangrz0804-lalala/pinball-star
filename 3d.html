@@ -6656,7 +6656,7 @@ function render(){
 
   }
 
-  if (use3D) {
+  if (use3D && location.hash.indexOf('noovl') < 0) {
     try { window.__PS.drawDyn(); }
     catch (e) { try { console.log('drawDyn: ' + e.message); } catch (e2) {} }
   }
@@ -7077,26 +7077,8 @@ window.__PS = {
     drawSpotNames();
     drawSpotMarker();
     drawUpperShadows();
-    // 球的加色拖尾（原版 drawBallOne 的离子尾迹；3D 球体只替代球本身）
-    const trailC = (TRAILS[state.profile.trail] || TRAILS.none).c;
-    for (let bi = 0; bi < balls.length; bi++) {
-      const b = balls[bi];
-      if (b.hidden || !b.trail || !b.trail.length) continue;
-      const lift = (b.rampT !== undefined) ? (b.rampZ || 0)
-                 : (b.deck === 'upper' ? DECK3D.z : 0);
-      ctx.save();
-      ctx.globalCompositeOperation = 'lighter';
-      for (let i = 0; i < b.trail.length; i++) {
-        const t = b.trail[i];
-        ctx.globalAlpha = (i / b.trail.length) * 0.30;
-        ctx.fillStyle = trailC;
-        ctx.beginPath();
-        ctx.arc(t.x, t.y - lift, b.r * (0.35 + 0.6 * i / b.trail.length), 0, 6.2832);
-        ctx.fill();
-      }
-      ctx.restore();
-      ctx.globalAlpha = 1;
-    }
+    /* 球的拖尾改由 3D 层绘制（renderOrder 在球之前）。
+       原来画在 2D 覆盖层上会压在 3D 球上，视觉上像"一个白雾球 + 一个实体球"。 */
   },
   caches: function(){ return [!!bgGradCache, !!spotNamesCache, !!deckTopCache, !!deckUnderCache, !!tableLightCache]; },
   autoPause: function(){ if (state.screen === 'play' && !state.paused){ state.paused = true; state.charging = false; } },

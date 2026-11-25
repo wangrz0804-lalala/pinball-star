@@ -62,10 +62,65 @@ let TILT_DEG = 24;
   let ballMesh = null, ball2Mesh = null;
   const ballShadows = [];
   let shadowTex = null, glowTex = null;
+  const TRAIL_N = 26;
+  const trailMeshes = [];
   let edgeGlowMat = null;
   // 挡板占用区域（逻辑坐标）：两支挡板 + 转轴 + 一点点余量
   const FLIP_RECT = { x: 50, y: 620, w: 380, h: 170 };
   let ready = false;
+
+  /* 球面皮肤贴图（等距柱状 256x128）：
+     竖向渐变做受光（顶亮底暗）+ 左上高光点，颜色取自原版 SKINS 三段色。 */
+  function makeBallTexture(pal) {
+    const c = document.createElement('canvas');
+    c.width = 256; c.height = 128;
+    const g = c.getContext('2d');
+    const grd = g.createLinearGradient(0, 0, 0, 128);
+    grd.addColorStop(0.00, pal[0]);
+    grd.addColorStop(0.38, pal[1]);
+    grd.addColorStop(0.80, pal[2]);
+    grd.addColorStop(1.00, pal[2]);
+    g.fillStyle = grd; g.fillRect(0, 0, 256, 128);
+    // 左上高光（光从上方来）
+    const hi = g.createRadialGradient(96, 30, 0, 96, 30, 46);
+    hi.addColorStop(0, 'rgba(255,255,255,.98)');
+    hi.addColorStop(0.45, 'rgba(255,255,255,.42)');
+    hi.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = hi; g.fillRect(0, 0, 256, 128);
+    // 底部偏暗，强化球感
+    const dk = g.createLinearGradient(0, 86, 0, 128);
+    dk.addColorStop(0, 'rgba(0,10,30,0)');
+    dk.addColorStop(1, 'rgba(0,10,30,.42)');
+    g.fillStyle = dk; g.fillRect(0, 0, 256, 128);
+    const t = new THREE.CanvasTexture(c);
+    t.anisotropy = 8;
+    return t;
+  }
+
+  /* 环境反射贴图：金属（metalness=1）没有 envMap 会渲染成纯黑，
+     这是"黑球"的直接原因。用一张竖向渐变 + 两个高光点当星空/顶灯即可。 */
+  function makeEnvTexture() {
+    const c = document.createElement('canvas');
+    c.width = 256; c.height = 128;
+    const g = c.getContext('2d');
+    const grd = g.createLinearGradient(0, 0, 0, 128);
+    grd.addColorStop(0.00, '#cfe4ff');
+    grd.addColorStop(0.28, '#4a68b0');
+    grd.addColorStop(0.52, '#16214a');
+    grd.addColorStop(0.78, '#2a1a3c');
+    grd.addColorStop(1.00, '#06090f');
+    g.fillStyle = grd; g.fillRect(0, 0, 256, 128);
+    // 两处高光：读作顶灯
+    [[72, 26, 30], [190, 40, 22]].forEach(function (l) {
+      const rg = g.createRadialGradient(l[0], l[1], 0, l[0], l[1], l[2]);
+      rg.addColorStop(0, 'rgba(255,255,255,.95)');
+      rg.addColorStop(1, 'rgba(255,255,255,0)');
+      g.fillStyle = rg; g.fillRect(0, 0, 256, 128);
+    });
+    const t = new THREE.CanvasTexture(c);
+    t.mapping = THREE.EquirectangularReflectionMapping;
+    return t;
+  }
 
   /* ---------------- 小工具 ---------------- */
   function makeTexFromCanvas(c) {
@@ -173,7 +228,10 @@ let TILT_DEG = 24;
     WZ_K = 1 / Math.cos(tilt);          // 纵向补偿（见 wz 定义处说明）
     // 拉远 + 收窄 fov：透视趋近正交，消除"近端变宽"的梯形，
     // 这样正交绘制的美术在 24° 斜视下仍是矩形，不会左右溢出。
-    camera = new THREE.PerspectiveCamera(2.45, 480 / 940, 1, 600);
+    /* 正交相机：透视（哪怕 fov 只有 2.45°）会让远端轻微压缩，
+       实测台面中部与 2D 差 3~4px，穹顶那条细线就出现重影。
+       正交 + Z 预拉伸 的映射是严格线性的：屏幕 y = 逻辑 y + 常数，与 2D 逐像素一致。 */
+    camera = new THREE.OrthographicCamera(-2.4, 2.4, 4.7, -4.7, 0.1, 800);
     camera.position.set(0, CAM_DIST * Math.cos(tilt), CAM_DIST * Math.sin(tilt));
     // up 必须位于"相机上方向"：绕 X 轴倾斜 tilt 后应为 (0, sin, -cos)。
     // 写成 (0, cos, -sin) 会让 up 与视线接近反平行，lookAt 正交化后投影矩阵退化
@@ -183,104 +241,18 @@ let TILT_DEG = 24;
     // 台面贴齐 2D 版心（屏幕 y=140..940）。
     // 平移必须沿相机 up 轴做"刚体平移"（translateY）——它只挪画面、不改朝向，比例不变。
     // 用 lookAt 抬目标点或 setViewOffset 都会引入额外的透视压缩/矩阵失真（都踩过）。
-    camera.translateY(0.66);
+    camera.translateY(0.70);   // 台面下沉：逻辑 y=0 对齐到屏幕 y=140（背板下沿）
 
     shadowTex = makeShadowTexture();
     glowTex = makeGlowTexture();
 
-    /* ---------- ⓪ 台体侧壁：机台厚度 ----------
-       这是"看得出是 3D"的关键：斜视时台面边缘出现真实的侧壁厚度与受光，
-       而台面上所有美术仍在 z=0 原位，不会位移。 */
-    (function () {
-      const outline = [];
-      outline.push([24, 636], [24, 264]);
-      for (let i = 0; i <= 40; i++) {
-        const a = Math.PI + Math.PI * (i / 40);
-        outline.push([240 + Math.cos(a) * 216, 264 + Math.sin(a) * 216]);
-      }
-      outline.push([456, 800], [24, 800]);
-      const shp = new THREE.Shape();
-      shp.moveTo(wx(outline[0][0]), -wz(outline[0][1]));
-      for (let i = 1; i < outline.length; i++) shp.lineTo(wx(outline[i][0]), -wz(outline[i][1]));
-      shp.closePath();
-      const DEPTH = 0.26;
-      const g = new THREE.ExtrudeGeometry(shp, { depth: DEPTH, bevelEnabled: false });
-      g.rotateX(-Math.PI / 2);
-      // 整体下移到台面平面**以下**：顶盖若与台面同高会 z-fighting（表现为横条纹）
-      g.translate(0, -DEPTH - 0.012, 0);
-      // 用纯色不受光：24° 斜视能看到侧壁正面，一旦交给 PBR 就会被点光照成一条亮带
-      // 侧壁用接近背景的深空色：24° 斜视会看到它的正面，
-      // 颜色偏亮就会在画面底部横一条突兀的带子（2D 版那里是自然的深空延伸）。
-      const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: 0x060a16 }));
-      m.renderOrder = 5;
-      scene.add(m);
+    /* 台体侧壁已移除：它沿穹顶外缘露出一条暗带，与 2D 那条细霓虹棱线叠在一起
+       会让穹顶看起来"粗了一圈/偏了 1-2px"。台面轮廓与边框由原版绘制负责。 */
 
-      // 台面外缘一圈发光线（霓虹机台边）
-      const rimPts = outline.map(function (p) {
-        return new THREE.Vector3(wx(p[0]), 0.002, wz(p[1]));
-      });
-      rimPts.push(rimPts[0].clone());
-      scene.add(new THREE.Line(
-        new THREE.BufferGeometry().setFromPoints(rimPts),
-        new THREE.LineBasicMaterial({ color: 0x7fd0ff, transparent: true, opacity: 0.55 })
-      ));
-    })();
-
-    /* ---------- ⓪ 实体侧墙 ----------
-       2D 版墙体 = 深色厚墙（22px 暗底 + 16px 蓝调） + 顶部 2px 霓虹棱线。
-       这里照这个结构做实体：墙身是深色金属（不发光，否则就成白带），
-       只有顶棱是一条细亮线 —— 这正是 3D 感与保真度的平衡点。 */
-    (function () {
-      const outerOnly = function (w) {
-        const inside = function (x, y) { return x > 32 && x < 448 && y > 272 && y < 772; };
-        return !(inside(w.ax, w.ay) && inside(w.bx, w.by));
-      };
-      const walls = (PS.WALLS || []).filter(outerOnly);
-      if (!walls.length) return;
-      const WALL_H = 0.052;              // 墙高：低矮橡胶挡条，不是高墙
-      const bodyMat = new THREE.MeshStandardMaterial({
-        color: 0x161f46,                 // 对应 2D 的 #1c2650 系深色
-        emissive: 0x1b2f66,
-        emissiveIntensity: 0.20,         // 极弱：只给一点存在感，绝不抢台面
-        roughness: 0.34,
-        metalness: 0.88
-      });
-      const box = new THREE.BoxGeometry(1, 1, 1);
-      const inst = new THREE.InstancedMesh(box, bodyMat, walls.length);
-      const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(),
-            p3 = new THREE.Vector3(), s3 = new THREE.Vector3(),
-            axisY = new THREE.Vector3(0, 1, 0);
-      // 顶棱：2D 里是一条 2px 霓虹线。3D 里 1px 的 Line 没有宽度、几乎看不见，
-      // 所以做成"细长条"实体（有宽度，能受光并投出高光），这才是 2D 那条棱线的对应物。
-      const rimMat = new THREE.MeshBasicMaterial({
-        color: 0x8cc0ff, transparent: true, opacity: 0.9
-      });
-      const rimInst = new THREE.InstancedMesh(box, rimMat, walls.length);
-      const rimPts = [];
-      for (let i = 0; i < walls.length; i++) {
-        const w = walls[i];
-        const dx = (w.bx - w.ax) * S, dz = (w.by - w.ay) * S;
-        const len = Math.hypot(dx, dz) || 0.001;
-        q.setFromAxisAngle(axisY, Math.atan2(-dz, dx));
-        const wId = Math.max(0.055, w.r * 2 * S * 0.92);
-        p3.set(wx((w.ax + w.bx) / 2), WALL_H / 2, wz((w.ay + w.by) / 2));
-        s3.set(len + wId * 0.5, WALL_H, wId);
-        m4.compose(p3, q, s3);
-        inst.setMatrixAt(i, m4);
-        // 顶棱细条：压在墙顶正中，宽 0.010、高 0.005
-        const rp = new THREE.Vector3(wx((w.ax + w.bx) / 2), WALL_H + 0.0015, wz((w.ay + w.by) / 2));
-        const rs = new THREE.Vector3(len + wId * 0.5, 0.005, 0.010);
-        m4.compose(rp, q, rs);
-        rimInst.setMatrixAt(i, m4);
-      }
-      inst.instanceMatrix.needsUpdate = true;
-      inst.renderOrder = 8;
-      scene.add(inst);
-
-      rimInst.instanceMatrix.needsUpdate = true;
-      rimInst.renderOrder = 9;
-      scene.add(rimInst);
-    })();
+    /* 实体侧墙已移除：
+       2D 版本身就把墙体画成了"22px 暗带 + 16px 蓝调 + 2px 霓虹棱线"，
+       再叠一层 3D 厚墙只会把这条棱线压暗、并在穹顶与发射道上糊出粗黑带
+       （闸门看起来"脱离墙体"也是因为这个）。墙体一律交给原版绘制。 */
 
     /* ---------- ① 台面底层（原版 2D 全部静态层）---------- */
     // 烘焙分辨率：按物理像素 1:1（DPR×480）出图，避免透视重采样后发虚
@@ -292,10 +264,15 @@ let TILT_DEG = 24;
     const ballGeo = new THREE.SphereGeometry(9 * S, 36, 26);
     // 关键：透明贴图层都在透明渲染队列，不透明球会先画、然后被贴图盖住。
     // 让球也进透明队列，并用 renderOrder 排到最上面。
-    const ballMat = new THREE.MeshStandardMaterial({
-      color: 0xffffff, metalness: 1.0, roughness: 0.07,
-      envMapIntensity: 2.4, emissive: 0x0a1020,
-      transparent: true, opacity: 1
+    /* 球体材质：**用 Basic + 球面皮肤贴图**，而不是 PBR 金属。
+       原因：metalness=1 的球没有足够环境光时会渲染成纯黑（用户看到"黑球"就是这个）；
+       即使加了 envMap 也很难稳定复现原版那种"白核 + 冰蓝 + 深蓝边"的观感。
+       这里直接按原版 SKINS.classic 三段色生成等距柱状贴图：
+       顶部亮、底部暗、左上一点高光 —— 既保住了原版配色，又靠球面 UV 得到球体明暗。
+       立体感由球体轮廓 + 台面投影贴片承担。 */
+    const ballTex = makeBallTexture(['#ffffff', '#cfeaff', '#5f9bd8']);
+    const ballMat = new THREE.MeshBasicMaterial({
+      map: ballTex, transparent: true, opacity: 1
     });
     ballMesh = new THREE.Mesh(ballGeo, ballMat);
     ballMesh.visible = false;
@@ -311,6 +288,23 @@ let TILT_DEG = 24;
     const l2 = new THREE.PointLight(0xff8fd0, 1.1, 10, 2); l2.position.set(2.6, 2.2, 1.6);
     const l3 = new THREE.PointLight(0xffffff, 1.5, 12, 2); l3.position.set(0.6, 4.6, 2.6);
     scene.add(l1); scene.add(l2); scene.add(l3);
+
+    /* 拖尾：用 3D 加色光片实现，renderOrder 排在球之前（69 < 70）——
+       如果把拖尾画在 2D 覆盖层上，它会盖在 3D 球上头，看起来像"两个球"（一个白雾、一个球体）。 */
+    for (let i = 0; i < TRAIL_N; i++) {
+      const q = new THREE.Mesh(
+        new THREE.PlaneGeometry(1, 1),
+        new THREE.MeshBasicMaterial({
+          map: glowTex, transparent: true, opacity: 0,
+          blending: THREE.AdditiveBlending, depthWrite: false, color: 0xbfe6ff
+        })
+      );
+      q.rotation.x = -Math.PI / 2;
+      q.visible = false;
+      q.renderOrder = 69;
+      scene.add(q);
+      trailMeshes.push(q);
+    }
 
     // 球的投影贴片
     [0, 1].forEach(function () {
@@ -407,6 +401,27 @@ let TILT_DEG = 24;
         document.title = 'RAMP ' + JSON.stringify(T);
       }
     }
+
+    /* 更新 3D 拖尾：按 b.trail 的点位铺光片，越靠后越小越淡 */
+    (function () {
+      let k = 0;
+      for (let bi = 0; bi < visible.length && k < TRAIL_N; bi++) {
+        const bb = visible[bi];
+        const tr = bb.trail || [];
+        const lift = heightOf(bb);
+        for (let i = 0; i < tr.length && k < TRAIL_N; i++, k++) {
+          const t = tr[i];
+          const q = trailMeshes[k];
+          const f = i / Math.max(1, tr.length);
+          q.visible = true;
+          q.position.set(wx(t.x), worldH(lift, bb.rampT !== undefined) + 0.012, wz(t.y));
+          const sz = 0.055 + 0.075 * f;
+          q.scale.set(sz, sz, 1);
+          q.material.opacity = 0.30 * f;
+        }
+      }
+      for (; k < TRAIL_N; k++) trailMeshes[k].visible = false;
+    })();
 
     renderer.render(scene, camera);
     drawFx();
@@ -517,6 +532,98 @@ let TILT_DEG = 24;
     }, 2500);
   }
 
+  /* #marker：在逻辑 (240,400) 高度 0 放一个红色标记球，用来实测"渲染位置 vs 投影位置" */
+  if (location.hash.indexOf('marker') >= 0) {
+    setTimeout(function () {
+      try {
+        const mk = new THREE.Mesh(
+          new THREE.SphereGeometry(0.09, 20, 14),
+          new THREE.MeshBasicMaterial({ color: 0xff2040 })
+        );
+        mk.position.set(wx(240), 0.09, wz(400));
+        mk.renderOrder = 99;
+        window.__R3.scene.add(mk);
+        const p = window.__R3.project(240, 400, 0);
+        // 再在"球网格实际位置"放一个绿色标记，验证渲染是否与网格一致
+        const b0 = PS.balls && PS.balls[0];
+        let info = null;
+        if (b0 && ballMesh && ballMesh.visible) {
+          const mg = new THREE.Mesh(new THREE.SphereGeometry(0.12, 16, 12),
+                                    new THREE.MeshBasicMaterial({ color: 0x00ff60 }));
+          mg.position.copy(ballMesh.position);
+          mg.renderOrder = 100;
+          window.__R3.scene.add(mg);
+          const v = ballMesh.position.clone().project(window.__R3.camera);
+          info = { mx: +ballMesh.position.x.toFixed(3), my: +ballMesh.position.y.toFixed(3),
+                   mz: +ballMesh.position.z.toFixed(3),
+                   sx: Math.round((v.x*0.5+0.5)*480), sy: Math.round((-v.y*0.5+0.5)*940) };
+        }
+        document.title = 'MARKER ' + JSON.stringify({ px: Math.round(p.x), py: Math.round(p.y), ball: info });
+      } catch (e) { document.title = 'MARKERERR ' + e.message; }
+    }, 2000);
+  }
+
+  /* #balltest：把球材质临时改成纯红不透明，判断"看不见"是材质问题还是几何问题 */
+  if (location.hash.indexOf('balltest') >= 0) {
+    setTimeout(function () {
+      try {
+        [ballMesh, ball2Mesh].forEach(function (m) {
+          if (!m) return;
+          m.material = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+        });
+        document.title = 'BALLTEST ok vis=' + (ballMesh && ballMesh.visible) +
+                         ' pos=' + (ballMesh ? ballMesh.position.toArray().map(function(n){return n.toFixed(2);}).join(',') : '-');
+      } catch (e) { document.title = 'BALLTESTERR ' + e.message; }
+    }, 2000);
+  }
+
+  /* #onlyball：只留球，隐藏其它层 —— 二分定位"球看不见"的原因 */
+  if (location.hash.indexOf('onlyball') >= 0) {
+    setTimeout(function () {
+      try {
+        const keep = [ballMesh, ball2Mesh];
+        window.__R3.scene.children.forEach(function (ch) {
+          if (keep.indexOf(ch) < 0 && ch.isMesh) ch.visible = false;
+        });
+        document.title = 'ONLYBALL ok';
+      } catch (e) { document.title = 'ONLYBALLERR ' + e.message; }
+    }, 2000);
+  }
+
+  if (location.hash.indexOf('playdiag') >= 0) {
+    PS.restart('classic');
+    PS.state.paused = false;
+    PS.state.mode = 'play';
+    PS.state.screen = 'play';
+    const b0 = PS.balls && PS.balls[0];
+    if (b0) { b0.x = 330; b0.y = 620; b0.vx = 0; b0.vy = 0; b0.hidden = false; b0.deck = 'lower'; b0.rampT = undefined; }
+
+  }
+
+  if (location.hash.indexOf('balldiag') >= 0) {
+    setTimeout(function () {
+      try {
+        const bs = (PS.balls || []).map(function (b) {
+          return { x: Math.round(b.x), y: Math.round(b.y), deck: b.deck, hid: !!b.hidden,
+                   rt: b.rampT === undefined ? null : +b.rampT.toFixed(2),
+                   trail: (b.trail || []).length };
+        });
+        const b0 = PS.balls && PS.balls[0];
+        const proj = b0 && window.__R3 ? window.__R3.project(b0.x, b0.y, heightOf(b0)) : null;
+        document.title = 'BALL ' + JSON.stringify({
+          projX: proj ? Math.round(proj.x) : null,
+          projY: proj ? Math.round(proj.y) : null,
+          meshY: ballMesh ? +ballMesh.position.y.toFixed(3) : null,
+          mode: PS.state.mode, screen: PS.state.screen,
+          n: bs.length, balls: bs,
+          m1: ballMesh ? ballMesh.visible : 'none',
+          m2: ball2Mesh ? ball2Mesh.visible : 'none',
+          base: window.__R3 && window.__R3.scene ? window.__R3.scene.children.length : -1
+        });
+      } catch (e) { document.title = 'BALLERR ' + e.message; }
+    }, 2500);
+  }
+
   if (location.hash.indexOf('#diag') >= 0) {
     setTimeout(function () {
       try {
@@ -582,7 +689,7 @@ let TILT_DEG = 24;
       }
       return;
     }
-    if (location.hash !== '#auto3d') return;
+    if (location.hash.indexOf('auto3d') < 0) return;
     const st = PS.state;
     PS.restart('classic');
     st.paused = false;
