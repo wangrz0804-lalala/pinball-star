@@ -484,7 +484,7 @@
         g.setIndex(idx);
         g.computeVertexNormals();
         const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
-          color: 0x080e1e, transparent: true, opacity: 0.97,
+          color: 0x0c1428, transparent: true, opacity: 0.72,
           side: THREE.DoubleSide, depthWrite: false
         }));
         m.renderOrder = 34;
@@ -511,7 +511,7 @@
         g.setIndex(idx);
         g.computeVertexNormals();
         const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
-          color: 0x2c4384, transparent: true, opacity: 0.95,
+          color: 0x2a4384, transparent: true, opacity: 0.80,
           side: THREE.DoubleSide, depthWrite: false
         }));
         m.renderOrder = 35;
@@ -535,7 +535,7 @@
          直接用"槽底局部切片"生成，天然横跨槽面并贴合曲率。
          （用旋转 Box 会因朝向轴算错而退化成沿槽细线 —— 踩过。） */
       const bandMat = new THREE.MeshBasicMaterial({
-        color: 0xffce54, transparent: true, opacity: 0.95, side: THREE.DoubleSide
+        color: 0xffce54, transparent: true, opacity: 0.82, side: THREE.DoubleSide
       });
       [0.22, 0.30, 0.40, 0.50, 0.60].forEach(function (tt) {
         const half = 0.018;                 // 沿槽方向半宽：合计约 3.6 逻辑 px
