@@ -30,10 +30,14 @@
   // 球/二层/坡道共用同一系数，保证球始终贴在平台表面上。
   const HSCALE = 0.50;
   const hzS = h => (h || 0) * S * HSCALE;
+  // 坡道抬升单独压低：坡道在画面中部，抬升会被透视放大成明显的横向位移，
+  // 一抬就和 2D 的桥位对不上。压低后位置回到 2D 的对应点，仍保留可读的高度差。
+  const RAMP_HSCALE = 0.30;
+  const hzR = h => (h || 0) * S * RAMP_HSCALE;
 
   // 相机倾角：原版矩阵约 24°，但我们的美术是为"正俯视"画的，
   // 角度一大就会明显失真、和 2D 版拉开差距。取 14° 兼顾纵深感与原版观感。
-  let TILT_DEG = 20;
+  let TILT_DEG = 14;
   (function () {
     const m = /#.*tilt=(\d+(?:\.\d+)?)/.exec(location.hash);
     if (m) {
@@ -41,8 +45,7 @@
       if (v >= 0 && v <= 55) TILT_DEG = v;
     }
   })();
-  const CAM_DIST = 19.6;
-  const VIEW_SHIFT_Y = -72;     // 台面下移：2D 版台面从 y=140（HEAD）开始
+  const CAM_DIST = 22.4;
 
   let renderer = null, scene = null, camera = null;
   let ballMesh = null, ball2Mesh = null;
@@ -151,12 +154,17 @@
     scene = new THREE.Scene();
 
     const tilt = TILT_DEG * Math.PI / 180;
-    camera = new THREE.PerspectiveCamera(27.6, 480 / 940, 0.1, 90);
+    camera = new THREE.PerspectiveCamera(23.0, 480 / 940, 0.1, 90);
     camera.position.set(0, CAM_DIST * Math.cos(tilt), CAM_DIST * Math.sin(tilt));
-    camera.up.set(0, Math.cos(tilt), -Math.sin(tilt));
+    // up 必须位于"相机上方向"：绕 X 轴倾斜 tilt 后应为 (0, sin, -cos)。
+    // 写成 (0, cos, -sin) 会让 up 与视线接近反平行，lookAt 正交化后投影矩阵退化
+    // —— 表现为 project() 返回 sy≈5000 这种离谱值，且整个视角是歪的。
+    camera.up.set(0, Math.sin(tilt), -Math.cos(tilt));
     camera.lookAt(0, 0, 0);
-    // 台面贴齐 2D 版心：整体下移，背板区留给 2D HUD
-    camera.setViewOffset(480, 940, 0, VIEW_SHIFT_Y, 480, 940);
+    // 台面贴齐 2D 版心（屏幕 y=140..940）。
+    // 平移必须沿相机 up 轴做"刚体平移"（translateY）——它只挪画面、不改朝向，比例不变。
+    // 用 lookAt 抬目标点或 setViewOffset 都会引入额外的透视压缩/矩阵失真（都踩过）。
+    camera.translateY(0.47);
 
     shadowTex = makeShadowTexture();
     glowTex = makeGlowTexture();
@@ -428,7 +436,6 @@
       if (!ramp || !PS.rampPoint) return;
 
       const N = 64;
-      const DECK_H = (PS.DECK3D ? PS.DECK3D.z : 52);
 
       // 采样中心线（含法向、半宽、抬升）
       const F = [];
@@ -452,7 +459,7 @@
         const w = (f.hw + (extraW || 0)) * side;
         return new THREE.Vector3(
           wx(f.x + f.nx * w),
-          hzS(f.h + (extraH || 0)),
+          hzR(f.h + (extraH || 0)),
           wz(f.y + f.ny * w)
         );
       };
@@ -661,8 +668,9 @@
     if (b.deck === 'upper') return (PS.DECK3D ? PS.DECK3D.z : 52) + 1;
     return 0;
   }
-  // 物理高度 → 世界高度（统一压缩，保证球贴在平台上）
-  const worldH = h => hzS(h);
+  // 物理高度 → 世界高度。坡道与平台用了不同压缩系数，
+  // 球必须跟着所在层走，否则会在坡道上"浮起来"或陷进去。
+  const worldH = (h, isRamp) => (isRamp ? hzR(h) : hzS(h));
 
   function frame() {
     if (!ready) return;
@@ -678,7 +686,7 @@
       if (!b) { m.visible = false; ballShadows[i].visible = false; continue; }
       const h = heightOf(b);
       m.visible = true;
-      m.position.set(wx(b.x), worldH(h) + 9 * S, wz(b.y));
+      m.position.set(wx(b.x), worldH(h, b.rampT !== undefined) + 9 * S, wz(b.y));
     }
 
     for (let i = 0; i < 2; i++) {
@@ -687,7 +695,7 @@
       const h = heightOf(b);
       const lift = Math.min(1, h / 60);
       shm.visible = true;
-      shm.position.set(wx(b.x) - 0.03, worldH(h) + 0.008, wz(b.y) + 0.05);
+      shm.position.set(wx(b.x) - 0.03, worldH(h, b.rampT !== undefined) + 0.008, wz(b.y) + 0.05);
       shm.material.opacity = 0.5 * (1 - lift * 0.4);
       const k = 0.40 + lift * 0.22;
       shm.scale.set(k, k, 1);
@@ -765,13 +773,19 @@
 
   /* 逻辑坐标 → 画布坐标（与相机严格一致） */
   const tmpV = new THREE.Vector3();
-  function project(x, y, h) {
+  function project(x, y, h, isRamp) {
     if (!camera) return null;
-    tmpV.set(wx(x), hz(h || 0), wz(y));
+    // 必须在这里刷新：菜单态 3D 不渲染，camera.matrixWorld 可能还是初始化时的旧值，
+    // 直接 project 会算出完全错的坐标（曾出现 sy≈5000）。
+    camera.updateMatrixWorld();
+    // 与实际几何用同一套高度系数，否则飘字/粒子会飘在元素上方
+    tmpV.set(wx(x), isRamp ? hzR(h || 0) : hzS(h || 0), wz(y));
     tmpV.project(camera);
+    if (!isFinite(tmpV.x) || !isFinite(tmpV.y)) return null;
+    // NDC → 逻辑画布坐标（480 x 940，含 140 背板）
     return {
       x: (tmpV.x * 0.5 + 0.5) * 480,
-      y: (-tmpV.y * 0.5 + 0.5) * 800
+      y: (-tmpV.y * 0.5 + 0.5) * 940
     };
   }
 
@@ -799,6 +813,27 @@
   }
 
   // #diag：把渲染尺寸打到标题上，供无头检查（清晰度问题的直接证据）
+  if (location.hash.indexOf('#rampdiag') >= 0) {
+    setTimeout(function () {
+      try {
+        const out = [];
+        // 先打台面四角：判断 4.8x8 的台面是否正好落在 480x800（y=140..940）
+        [[0,0],[0,800],[480,0],[480,800],[240,400]].forEach(function (p) {
+          const sp = project(p[0], p[1], 0);
+          out.push({ pt: p.join(','), sx: sp ? +sp.x.toFixed(1) : null, sy: sp ? +sp.y.toFixed(1) : null });
+        });
+        [0, 0.25, 0.5, 0.75, 1].forEach(function (t) {
+          const p = PS.rampPoint(t);
+          const h = PS.rampH(t);
+          const sp = project(p.x, p.y, h);
+          out.push({ t: t, lx: +p.x.toFixed(1), ly: +p.y.toFixed(1), h: +h.toFixed(1),
+                     sx: sp ? +sp.x.toFixed(1) : null, sy: sp ? +sp.y.toFixed(1) : null });
+        });
+        document.title = 'RAMPDIAG ' + JSON.stringify(out);
+      } catch (e) { document.title = 'RAMPDIAGERR ' + e.message; }
+    }, 2500);
+  }
+
   if (location.hash.indexOf('#diag') >= 0) {
     setTimeout(function () {
       try {
