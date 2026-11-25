@@ -24,20 +24,31 @@
   const S = 1 / 100;                 // 逻辑像素 → 世界单位
   const CX = 240, CY = 400;
   const wx = x => (x - CX) * S;
-  const wz = y => (y - CY) * S;
+  /* 纵向补偿（保真的核心）：
+    我们的台面贴图是**正交**画的（480x800 像素图），而 24° 斜视会把纵深压缩 cos24°=0.913，
+    直接贴上去就会变成"上窄下宽 + 纵向压扁"。把世界 Z 预拉伸 1/cos24°，
+     在斜视投影下正好还原成 4.8:8 —— 贴图比例、位置全部与原版 2D 一致。
+     而立体物件（圆柱/侧墙）的高度仍按真实压缩，斜视感由它们和投影提供。 */
+  let WZ_K = 1;
+  const wz = y => (y - CY) * S * WZ_K;
   const hz = h => (h || 0) * S;
   // 2D 版的"抬升 52px"是视觉位移，不是真实物理高度；压缩后既保纵深又不挡后方台面。
   // 球/二层/坡道共用同一系数，保证球始终贴在平台表面上。
   const HSCALE = 0.50;
   const hzS = h => (h || 0) * S * HSCALE;
-  // 坡道抬升单独压低：坡道在画面中部，抬升会被透视放大成明显的横向位移，
-  // 一抬就和 2D 的桥位对不上。压低后位置回到 2D 的对应点，仍保留可读的高度差。
-  const RAMP_HSCALE = 0.30;
+  /* 坡道与二层**必须用同一个高度系数**：
+     rampH(1) === DECK3D.z，坡道末端本来就该正好落在二层顶面。
+     之前给坡道单独压到 0.30、二层用 0.50，两者在交付口差了一截 —— 视觉上就是"坡道和二层分体"。
+     统一后坡道末端与二层顶面严丝合缝，读作一个整体。 */
+  const RAMP_HSCALE = HSCALE;
   const hzR = h => (h || 0) * S * RAMP_HSCALE;
 
   // 相机倾角：原版矩阵约 24°，但我们的美术是为"正俯视"画的，
   // 角度一大就会明显失真、和 2D 版拉开差距。取 14° 兼顾纵深感与原版观感。
-  let TILT_DEG = 14;
+  // 原版 Space Cadet 的投影矩阵（proj.cpp 常量）反算：
+//   cosθ=0.913545, sinθ=0.406737 → θ = 24.000°
+// 这就是原版的观察倾角，默认按原版来。
+let TILT_DEG = 24;
   (function () {
     const m = /#.*tilt=(\d+(?:\.\d+)?)/.exec(location.hash);
     if (m) {
@@ -45,14 +56,16 @@
       if (v >= 0 && v <= 55) TILT_DEG = v;
     }
   })();
-  const CAM_DIST = 22.4;
+  const CAM_DIST = 220.0;   // 极远相机 + 极窄 fov：几乎正交，无梯形   // 配合窄 fov：近似正交，梯形可忽略
 
   let renderer = null, scene = null, camera = null;
   let ballMesh = null, ball2Mesh = null;
   const ballShadows = [];
   let shadowTex = null, glowTex = null;
   const bumperPops = [];
-  const flipperMeshes = [];      // {g, f, glow, body, core, ring}
+  const flipperMeshes = [];      // {g, f, halo, edge, body, core, ring}
+  let edgeGlowMat = null;
+  let deckLayerRef = null, deckShadowRef = null;
   // 挡板占用区域（逻辑坐标）：两支挡板 + 转轴 + 一点点余量
   const FLIP_RECT = { x: 50, y: 620, w: 380, h: 170 };
   let ready = false;
@@ -61,7 +74,8 @@
   function makeTexFromCanvas(c) {
     const t = new THREE.CanvasTexture(c);
     t.anisotropy = 8;
-    t.encoding = THREE.sRGBEncoding;
+    // 不设 sRGB 编码：贴图内容本身就是"最终像素值"（和 2D canvas 完全一样），
+    // 解码再编码只会引入偏差。见 renderer.outputEncoding 处的说明。
     t.minFilter = THREE.LinearFilter;
     t.magFilter = THREE.LinearFilter;
     return t;
@@ -148,13 +162,21 @@
     renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, alpha: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setClearColor(0x05070f, 0);
-    renderer.outputEncoding = THREE.sRGBEncoding;
-    renderer.toneMapping = THREE.NoToneMapping;   // 美术原色，不做任何压缩
+    /* 色彩管线必须"直通"：
+       我们的贴图是 Canvas 画好的**最终像素**（与 2D 版逐字节一致）。
+       如果开 sRGB 输出，Three.js 会把纯色材质当线性色再编码一次 ——
+       所有纯色都被提亮（挡板的 #0c1430 被冲成灰白、侧壁变亮带，都是这个原因）。
+       关掉编码后，材质色 = 屏幕色，贴图色 = 原图色，与 2D 完全一致。 */
+    renderer.outputEncoding = THREE.LinearEncoding;
+    renderer.toneMapping = THREE.NoToneMapping;
 
     scene = new THREE.Scene();
 
     const tilt = TILT_DEG * Math.PI / 180;
-    camera = new THREE.PerspectiveCamera(23.0, 480 / 940, 0.1, 90);
+    WZ_K = 1 / Math.cos(tilt);          // 纵向补偿（见 wz 定义处说明）
+    // 拉远 + 收窄 fov：透视趋近正交，消除"近端变宽"的梯形，
+    // 这样正交绘制的美术在 24° 斜视下仍是矩形，不会左右溢出。
+    camera = new THREE.PerspectiveCamera(2.45, 480 / 940, 1, 600);
     camera.position.set(0, CAM_DIST * Math.cos(tilt), CAM_DIST * Math.sin(tilt));
     // up 必须位于"相机上方向"：绕 X 轴倾斜 tilt 后应为 (0, sin, -cos)。
     // 写成 (0, cos, -sin) 会让 up 与视线接近反平行，lookAt 正交化后投影矩阵退化
@@ -164,7 +186,7 @@
     // 台面贴齐 2D 版心（屏幕 y=140..940）。
     // 平移必须沿相机 up 轴做"刚体平移"（translateY）——它只挪画面、不改朝向，比例不变。
     // 用 lookAt 抬目标点或 setViewOffset 都会引入额外的透视压缩/矩阵失真（都踩过）。
-    camera.translateY(0.47);
+    camera.translateY(0.66);
 
     shadowTex = makeShadowTexture();
     glowTex = makeGlowTexture();
@@ -189,13 +211,10 @@
       g.rotateX(-Math.PI / 2);
       // 整体下移到台面平面**以下**：顶盖若与台面同高会 z-fighting（表现为横条纹）
       g.translate(0, -DEPTH - 0.012, 0);
-      const m = new THREE.Mesh(g, new THREE.MeshStandardMaterial({
-        color: 0x101a38,
-        emissive: 0x24448c,
-        emissiveIntensity: 0.55,
-        roughness: 0.42,
-        metalness: 0.85
-      }));
+      // 用纯色不受光：24° 斜视能看到侧壁正面，一旦交给 PBR 就会被点光照成一条亮带
+      // 侧壁用接近背景的深空色：24° 斜视会看到它的正面，
+      // 颜色偏亮就会在画面底部横一条突兀的带子（2D 版那里是自然的深空延伸）。
+      const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: 0x060a16 }));
       m.renderOrder = 5;
       scene.add(m);
 
@@ -308,7 +327,7 @@
           Math.round((b.x - pad) * BAKESCALE), Math.round((b.y - pad) * BAKESCALE),
           sq, sq, 0, 0, sq, sq);
         const capTex = new THREE.CanvasTexture(capCv);
-        capTex.encoding = THREE.sRGBEncoding;
+        capTex.encoding = THREE.LinearEncoding;
         capTex.anisotropy = 8;
         const cap = new THREE.Mesh(
           new THREE.CircleGeometry(rW, 40),
@@ -335,11 +354,14 @@
       });
     })();
 
-    /* ---------- ③ 挡板：实体几何，绕转轴真实旋转 ----------
-       严格照 2D 的视觉语言做分层：
-         · 2D 是 shadowBlur 外发光 + 17px 亮描边 + 11px 深色棒 + 3.5px 亮内芯 + 转轴圆
-         · 3D 就做  外辉光柱 + 深色棒体（带本色自发光）+ 顶部亮内芯 + 转轴柱与环
-       按下时整体由蓝转品红（对应 2D 的 #84bcff → #ff9ee8）。 */
+    /* ---------- ③ 挡板：实体几何 + 荧光分层 ----------
+       严格复刻 2D 的绘制分层（drawFlippers）：
+         ① 外发光（shadowBlur 16~28，加色外溢）  → 加色外晕管 + 柔光雾
+         ② 亮蓝描边（lineWidth 17）              → 亮蓝管
+         ③ 深色棒体（lineWidth 11，#0c1430）     → 深色管（压在亮蓝管上）
+         ④ 亮内芯（lineWidth 3.5，#d8edff）      → 白色细芯
+       四层同心套起来，俯视就是 2D 的"荧光边 + 深色棒 + 白芯"，
+       斜视还能看到圆柱的真实体积与受光。 */
     flipperMeshes.length = 0;
     [PS.leftF, PS.rightF].forEach(function (f) {
       if (!f) return;
@@ -347,62 +369,67 @@
       const g = new THREE.Group();
       g.position.set(wx(f.px), 0, wz(f.py));
 
-      /* 2D 的霓虹描边是"沿棒外形的一圈亮线"。3D 里用两根细棱条实现：
-         俯视时正好落在棒的上下两侧，读作描边；同时棒体保持深色不被染白。
-         （之前用加色辉光柱会把整根棒冲淡，丢掉 2D 的深色棒对比。） */
-      const glowMat = new THREE.MeshBasicMaterial({
-        color: 0x6fb8ff, transparent: true, opacity: 1
-      });
-      const glowGroup = new THREE.Group();
-      // 棱条必须落在棒体**表面**上：棒半径 0.052、中心 y=0.055，
-      // 在 z=±0.040 处表面高度约 0.088，棱条就压在这条线上。
-      [-1, 1].forEach(function (sd) {
-        const eg = new THREE.BoxGeometry(lenW * 0.99, 0.011, 0.011);
-        eg.translate(lenW / 2, 0, 0);
-        const e = new THREE.Mesh(eg, glowMat);
-        e.position.set(0, 0.092, sd * 0.040);
-        e.renderOrder = 29;
-        glowGroup.add(e);
-      });
-      g.add(glowGroup);
+      const tube = function (radius, mat, yOff, order, lenMul) {
+        const geo = new THREE.CylinderGeometry(radius, radius, lenW * (lenMul || 1), 22, 1, false);
+        geo.rotateZ(Math.PI / 2);
+        geo.translate(lenW / 2, 0, 0);
+        const m = new THREE.Mesh(geo, mat);
+        m.position.y = yOff;
+        m.renderOrder = order;
+        g.add(m);
+        return m;
+      };
 
-      // 柔和外晕：大范围、极低不透明度，只在棒周围形成一层光雾。
-      // 作用是加强"深色棒 vs 亮背景"的对比（2D 的 shadowBlur 就是这个观感）。
-      const hazeGeo = new THREE.CylinderGeometry(0.145, 0.145, lenW * 1.02, 16, 1, true);
-      hazeGeo.rotateZ(Math.PI / 2);
-      hazeGeo.translate(lenW / 2, 0, 0);
-      const hazeMat = new THREE.MeshBasicMaterial({
-        color: 0x2f6fd8, transparent: true, opacity: 0.13,
-        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide
+      /* ① 外发光：围绕棒轮廓的一圈柔光（shadowBlur 的对应物）。
+         不能做成圆柱：实心圆柱会把整根棒包住，additive 一叠就冲成白色（踩过两次）。
+         做成平铺在棒下方的拉伸柔光面 —— 只在棒体外围溢出。 */
+      const haloMat = new THREE.MeshBasicMaterial({
+        map: glowTex, color: 0x5aa4ff, transparent: true, opacity: 0.60,
+        blending: THREE.AdditiveBlending, depthWrite: false
       });
-      const haze = new THREE.Mesh(hazeGeo, hazeMat);
-      haze.position.y = 0.048;
-      haze.renderOrder = 27;
-      g.add(haze);
+      const haloGeo = new THREE.PlaneGeometry(lenW * 2.1, lenW * 2.1);
+      haloGeo.rotateX(-Math.PI / 2);
+      haloGeo.translate(lenW / 2, 0, 0);
+      const halo = new THREE.Mesh(haloGeo, haloMat);
+      halo.position.y = 0.016;
+      halo.renderOrder = 25;
+      g.add(halo);
 
-      // 棒体：深色金属（对应 2D 的 #0c1430、11px）
-      const bodyGeo = new THREE.CylinderGeometry(0.052, 0.052, lenW, 18);
-      bodyGeo.rotateZ(Math.PI / 2);
-      bodyGeo.translate(lenW / 2, 0, 0);
-      // 用 Basic 而非 Standard：2D 的棒体就是纯色 #0c1430，
-      // 一旦交给 PBR 就会被点光照成灰白，丢掉那种"深色棒 + 霓虹描边"的对比。
+      /* ② 深色棒体（2D 的 11px #0c1430）。
+         用"深色大圆柱 + 顶部两条亮棱线"，不用同心套管 ——
+         套管的外层半径一大，就会从侧面把内层深色棒整个遮住（实测深色完全看不见）。 */
       const bodyMat = new THREE.MeshBasicMaterial({ color: 0x0c1430 });
-      const body = new THREE.Mesh(bodyGeo, bodyMat);
-      body.position.y = 0.053;
-      body.renderOrder = 30;
-      g.add(body);
+      const bodyMesh = tube(0.070, bodyMat, 0.056, 30);
 
-      // 内芯亮线（对应 2D 的 3.5px #d8edff 细线，压在棒顶）
-      const coreGeo = new THREE.CylinderGeometry(0.009, 0.009, lenW * 0.97, 10);
-      coreGeo.rotateZ(Math.PI / 2);
-      coreGeo.translate(lenW / 2, 0, 0);
-      const coreMat = new THREE.MeshBasicMaterial({
-        color: 0xd8edff, transparent: true, opacity: 0.92
+      /* ③ 荧光棱线：棒顶两侧各一条，读作 2D 的 17px 亮蓝描边。
+         每条分两层：不透明亮线（描边本体）+ 更宽的加色外溢（shadowBlur 的辉光）。
+         这样荧光是"从描边向外扩散"的，而不是把整根棒冲白。 */
+      const edgeMat = new THREE.MeshBasicMaterial({ color: 0x84bcff });
+      edgeGlowMat = new THREE.MeshBasicMaterial({
+        color: 0x5aa4ff, transparent: true, opacity: 0.42,
+        blending: THREE.AdditiveBlending, depthWrite: false
       });
-      const core = new THREE.Mesh(coreGeo, coreMat);
-      core.position.y = 0.101;
-      core.renderOrder = 31;
-      g.add(core);
+      [-1, 1].forEach(function (sd) {
+        // 辉光层（宽、淡、加色）
+        const gg = new THREE.BoxGeometry(lenW * 0.995, 0.042, 0.070);
+        gg.translate(lenW / 2, 0, 0);
+        const gm = new THREE.Mesh(gg, edgeGlowMat);
+        gm.position.set(0, 0.090, sd * 0.055);
+        gm.renderOrder = 30;
+        g.add(gm);
+
+        // 描边本体（窄、实）
+        const eg = new THREE.BoxGeometry(lenW * 0.995, 0.014, 0.019);
+        eg.translate(lenW / 2, 0, 0);
+        const e = new THREE.Mesh(eg, edgeMat);
+        e.position.set(0, 0.093, sd * 0.055);
+        e.renderOrder = 31;
+        g.add(e);
+      });
+
+      // ④ 亮内芯（2D 的 3.5px #d8edff），压在棒顶正中
+      const coreMat = new THREE.MeshBasicMaterial({ color: 0xd8edff });
+      tube(0.011, coreMat, 0.093, 32);
 
       // 转轴：深色柱 + 霓虹环（2D 的 8px 圆 + 2px 描边）
       const piv = new THREE.Mesh(
@@ -415,16 +442,17 @@
 
       const ringGeo = new THREE.TorusGeometry(0.072, 0.0085, 8, 26);
       ringGeo.rotateX(Math.PI / 2);
-      const ringMat = new THREE.MeshBasicMaterial({
-        color: 0x5a9cff, transparent: true, opacity: 0.9
-      });
+      const ringMat = new THREE.MeshBasicMaterial({ color: 0x5a9cff, transparent: true, opacity: 0.95 });
       const ring = new THREE.Mesh(ringGeo, ringMat);
       ring.position.y = 0.100;
       ring.renderOrder = 32;
       g.add(ring);
 
       scene.add(g);
-      flipperMeshes.push({ g: g, f: f, glow: glowMat, body: bodyMat, core: coreMat, ring: ringMat, haze: hazeMat });
+      flipperMeshes.push({
+        g: g, f: f, halo: haloMat, edge: edgeMat, haloMesh: halo,
+        body: bodyMat, core: coreMat, ring: ringMat
+      });
     });
 
     /* ---------- ④ 坡道：实体槽（槽底 + 侧壁 + 银轨 + 黄带）----------
@@ -456,7 +484,13 @@
       }
 
       const vertToWorld = function (f, side, extraW, extraH) {
-        const w = (f.hw + (extraW || 0)) * side;
+        /* 末段裙边：2D 的 apron 从 t=0.70 起把半宽加 6px（drawLift 里 w = rampHalfW(t)+6），
+           目的就是让坡道"铺开"盖住二层入口，读作一个整体。
+           这里同样处理，并且多给一点（+14），因为 3D 斜视下需要更宽才盖得住接缝。 */
+        // 2D 的 apron 就是 rampHalfW(t) + 6；给多了末端会比二层颈部还宽，反而露出截断面
+        const apron = f.t > 0.70 ? (f.t - 0.70) / 0.30 : 0;
+        const extra = (extraW || 0) + apron * apron * 6;
+        const w = (f.hw + extra) * side;
         return new THREE.Vector3(
           wx(f.x + f.nx * w),
           hzR(f.h + (extraH || 0)),
@@ -464,16 +498,35 @@
         );
       };
 
-      /* —— 槽底 —— */
+      /* —— 槽底（含"钻进二层"的延伸段）——
+         坡道中心线终点正好落在二层入口边界上，只画到那里视觉上就是"贴在边上"；
+         2D 用 apron 裙边把这一段盖住。3D 这里让槽底继续沿二层颈部向前延伸 52px，
+         延伸段藏在二层平台之下（二层 renderOrder 50 > 槽底 34），
+         只露出接缝附近的一小截 —— 于是坡道与二层读作一个整体，而不是两件东西。 */
       (function () {
+        const DECKH = (PS.DECK3D ? PS.DECK3D.z : 52);
+        const EXT_N = 10, EXT_LEN = 52;
+        const lastP = F[N];
+        const FEX = F.slice();
+        for (let k = 1; k <= EXT_N; k++) {
+          const u = k / EXT_N;
+          FEX.push({
+            t: 1 + u * 0.001,                       // 保持 ~1，裙边加宽公式自然生效
+            x: lastP.x,
+            y: lastP.y + EXT_LEN * u,
+            nx: 0, ny: 1,
+            hw: 16 - 2 * u,                          // 16 → 14：贴住二层颈部，不外溢
+            h: DECKH
+          });
+        }
         const verts = [], idx = [], uvs = [];
-        for (let i = 0; i <= N; i++) {
-          const f = F[i];
+        for (let i = 0; i < FEX.length; i++) {
+          const f = FEX[i];
           const L = vertToWorld(f, -1, 0, 0);
           const R = vertToWorld(f, 1, 0, 0);
           verts.push(L.x, L.y, L.z, R.x, R.y, R.z);
           uvs.push(0, f.t, 1, f.t);
-          if (i < N) {
+          if (i < FEX.length - 1) {
             const a = i * 2;
             idx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3);
           }
@@ -484,7 +537,7 @@
         g.setIndex(idx);
         g.computeVertexNormals();
         const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
-          color: 0x0c1428, transparent: true, opacity: 0.72,
+          color: 0x101c38, transparent: true, opacity: 0.58,
           side: THREE.DoubleSide, depthWrite: false
         }));
         m.renderOrder = 34;
@@ -495,10 +548,18 @@
       [-1, 1].forEach(function (side) {
         const verts = [], idx = [];
         const WALL_H = 0.078;
+        /* 末段槽壁渐隐（2D 的 apron fusion）：
+           坡道越靠近二层，槽壁越矮，到交付口正好归零 ——
+           这样槽体与二层顶面自然融成一体，不会出现一道"截断"的边界。 */
+        const wallAt = function (t) {
+          if (t < 0.70) return WALL_H;
+          const k = Math.min(1, (t - 0.70) / 0.30);
+          return WALL_H * (1 - k * k);
+        };
         for (let i = 0; i <= N; i++) {
           const f = F[i];
           const b = vertToWorld(f, side, 0, 0);
-          const tp = b.clone(); tp.y += WALL_H;
+          const tp = b.clone(); tp.y += wallAt(f.t);
           verts.push(b.x, b.y, b.z, tp.x, tp.y, tp.z);
           if (i < N) {
             const a = i * 2;
@@ -522,8 +583,11 @@
       [-1, 1].forEach(function (side) {
         const pts = [];
         for (let i = 0; i <= N; i += 2) {
-          const p = vertToWorld(F[i], side, 0, 0);
-          pts.push(new THREE.Vector3(p.x, p.y + 0.080, p.z));
+          const f2 = F[i];
+          const p = vertToWorld(f2, side, 0, 0);
+          // 末段银轨同样收进槽底，与二层顶面平齐
+          const k2 = f2.t < 0.70 ? 0 : Math.min(1, (f2.t - 0.70) / 0.30);
+          pts.push(new THREE.Vector3(p.x, p.y + 0.080 * (1 - k2 * k2), p.z));
         }
         scene.add(new THREE.Line(
           new THREE.BufferGeometry().setFromPoints(pts),
@@ -586,7 +650,12 @@
       shLayer.position.set(0.055, 0.004, 0.075);
       const deckLayer = addLayer(deckCanvas, 0, 50);
       deckLayer.position.y = deckH;
+      // 记录引用：每帧按 PS.DECK3D.fade 调整不透明度，
+      // 球钻到二层下方时平台淡出（与 2D 版同一套逻辑，fade 1→0.42）
+      deckLayerRef = deckLayer;
+      deckShadowRef = shLayer;
     } catch (e) {}
+
 
     /* ---------- ⑥ 蓄力条 ---------- */
     try { addLayer(PS.bake('plunger', BAKESCALE), 0, 25); } catch (e) {}
@@ -701,16 +770,26 @@
       shm.scale.set(k, k, 1);
     }
 
-    // 挡板：绕转轴真实旋转；按下时蓝→品红（对应 2D 的颜色切换）
+    /* 二层遮挡淡出：球从二层下方掠过时，平台变半透明让球可见。
+       直接读 2D 版算好的 PS.DECK3D.fade（update 里已做 1→0.42 的平滑过渡），
+       两边共用同一份状态，行为与 2D 完全一致。 */
+    if (deckLayerRef) {
+      const fd = (PS.DECK3D && PS.DECK3D.fade !== undefined) ? PS.DECK3D.fade : 1;
+      deckLayerRef.material.opacity = fd;
+      if (deckShadowRef) deckShadowRef.material.opacity = 0.62 * fd;
+    }
+
+    // 挡板：绕转轴真实旋转；按下时蓝→品红（对应 2D 的 #84bcff → #ff9ee8）
     for (let i = 0; i < flipperMeshes.length; i++) {
       const fm = flipperMeshes[i];
       fm.g.rotation.y = -fm.f.angle;
       const pressed = !!fm.f.pressed;
-      fm.glow.color.setHex(pressed ? 0xff7ee0 : 0x5a9cff);
-      fm.glow.opacity = 1;
-      if (fm.haze) {
-        fm.haze.color.setHex(pressed ? 0xd8409c : 0x2f6fd8);
-        fm.haze.opacity = pressed ? 0.20 : 0.13;
+      fm.halo.color.setHex(pressed ? 0xff5ecb : 0x4f9dff);
+      fm.halo.opacity = pressed ? 0.60 : 0.46;
+      fm.edge.color.setHex(pressed ? 0xff9ee8 : 0x84bcff);
+      if (edgeGlowMat) {
+        edgeGlowMat.color.setHex(pressed ? 0xff5ecb : 0x5aa4ff);
+        edgeGlowMat.opacity = pressed ? 0.62 : 0.42;
       }
       fm.core.color.setHex(pressed ? 0xffe6f9 : 0xd8edff);
       fm.ring.color.setHex(pressed ? 0xff5ecb : 0x5a9cff);
@@ -848,6 +927,22 @@
   }
 
   function driveIfAsked() {
+    // #under：把球放到二层正下方，验证平台淡出（2D 的 DECK3D.fade 1→0.42）
+    if (location.hash.indexOf('#under') >= 0) {
+      PS.restart('classic');
+      PS.state.paused = false;
+      PS.state.mode = 'play';
+      const b = PS.balls && PS.balls[0];
+      if (b) {
+        b.deck = 'lower';
+        b.rampT = undefined;
+        b.x = 96 - 6;        // DECK2.cx
+        b.y = 400;           // 落在二层多边形内
+        b.vx = 0; b.vy = 0;
+        b.hidden = false;
+      }
+      return;
+    }
     // #ride：把球摆到坡道上，验证球与槽底的贴合（高度/宽度是否正确）
     if (location.hash.indexOf('#ride') >= 0) {
       const m = /ride=(\d+)/.exec(location.hash);
