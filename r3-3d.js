@@ -388,6 +388,26 @@ let TILT_DEG = 24;
 
 
 
+    if (window.__RAMPTEST) {
+      const b0 = (PS.balls || [])[0];
+      if (b0) {
+        const T = window.__RAMPTEST;
+        if (b0.rampT !== undefined) { T.entered = true; T.maxT = Math.max(T.maxT, b0.rampT); }
+        T.deck = b0.deck;
+        T.now = b0.rampT === undefined ? 'off' : +b0.rampT.toFixed(3);
+        T.v = b0.rampV === undefined ? null : +b0.rampV.toFixed(3);
+        T.n = (PS.balls || []).length;
+        T.x = Math.round(b0.x); T.y = Math.round(b0.y);
+        T.hid = !!b0.hidden; T.mode = PS.state.mode;
+        if (b0.deck === 'upper') T.reached = true;
+        T.prev = T.lastT; T.lastT = b0.rampT;
+        if (T.prev !== undefined && T.prev > 0.85 && b0.rampT !== undefined && b0.rampT < 0.15) {
+          T.cyc = (T.cyc || 0) + 1;
+        }
+        document.title = 'RAMP ' + JSON.stringify(T);
+      }
+    }
+
     renderer.render(scene, camera);
     drawFx();
   }
@@ -510,7 +530,26 @@ let TILT_DEG = 24;
     }, 2500);
   }
 
+  /* #rampweak / #rampstrong：验证坡道动能判定（弱球应滚回，强球应上二层） */
+  function rampTest(vy) {
+    PS.restart('classic');
+    PS.state.paused = false;
+    PS.state.mode = 'play';
+    const b = PS.balls && PS.balls[0];
+    if (!b) return;
+    b.deck = 'lower';
+    b.hidden = false;
+    b.x = PS.RAMP.x; b.y = PS.RAMP.y + 6;
+    b.vx = 0; b.vy = -vy;           // 向上冲
+    b.rampT = undefined;
+    PS.RAMP.cd = 0;
+    // 记录结果，供无头读取
+    window.__RAMPTEST = { vy: vy, entered: false, maxT: 0, deck: 'lower' };
+  }
+
   function driveIfAsked() {
+    if (location.hash.indexOf('#rampweak') >= 0) { rampTest(300); return; }
+    if (location.hash.indexOf('#rampstrong') >= 0) { rampTest(900); return; }
     // #under：把球放到二层正下方，验证平台淡出（2D 的 DECK3D.fade 1→0.42）
     if (location.hash.indexOf('#under') >= 0) {
       PS.restart('classic');

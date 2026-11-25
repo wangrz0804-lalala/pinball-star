@@ -2392,7 +2392,24 @@ function stepUpperDeck(b, dt){
 function stepBall(b, dt){
   // 坡道上行中：球可见，沿坡道中心线滑行（高度从台面升到二层），从交付口落到平台。
   if (b.rampT !== undefined){
-    b.rampT += dt / RAMP.rideT;
+    /* 坡道动力学：初速由进桥时的动能决定，爬坡时被重力持续减速。
+       —— 坡道不是传送带：动能不够的球会失速并滚回坡道口，只有冲得上去的才进二层。 */
+    const G_RAMP = 0.80;                 // 沿槽的减速度
+    if (b.rampV === undefined) b.rampV = 1.2;
+    b.rampV -= G_RAMP * dt;
+    b.rampT += b.rampV * dt;
+    if (b.rampT < 0){
+      b.rampT = undefined; b.rampZ = 0; b.rampV = undefined;
+      b.x = RAMP.x; b.y = RAMP.y + 4;
+      b.vx = (Math.random() - 0.5) * 70;
+      b.vy = 150;
+      b.stuck = 0; b.tries = 0;
+      b.zg = {x:b.x, y:b.y, t:0, n:0};
+      RAMP.cd = 0.7;
+      popText(b.x, b.y - 26, '动能不足', 'rgba(160,190,235,.95)');
+      sfx.select();
+      return;
+    }
     const t = Math.min(1, b.rampT);
     // 沿折线路径按累计长度插值
     const path = RAMP.path;
@@ -2415,7 +2432,7 @@ function stepBall(b, dt){
     b.rampZ = rampH(t);                   // 高度渐变：与坡道桥面同曲线，球贴在槽内
     b.trail.length = 0;
     if (t >= 1){
-      b.rampT = undefined; b.rampZ = 0;
+      b.rampT = undefined; b.rampZ = 0; b.rampV = undefined;
       b.deck = 'upper';
       b.x = RAMP.tx; b.y = RAMP.ty;
       // 交付后向下落入过渡区（①→②）：轻微横向散开，靠重力开始下落流程
@@ -2661,6 +2678,8 @@ function stepBall(b, dt){
       b.x > RAMP.sx0 && b.x < RAMP.sx1 && b.y > RAMP.sy0 && b.y < RAMP.sy1 && b.vy < RAMP.enterVy){
     RAMP.cd = 2.0;
     b.rampT = 0;                       // 可见滑行，从坡道口开始
+    /* 进桥动能：|vy| 约 531px/s 以上才能冲上二层，刚过门槛的球会滑到一半退回。 */
+    b.rampV = Math.max(0.30, Math.min(2.00, Math.abs(b.vy) / 420));
     b.vx = 0; b.vy = 0; b.trail.length = 0;
     addScore(2000, RAMP.x, RAMP.y - 22, C.cyan);
     popText(RAMP.x, RAMP.y - 44, 'RAMP +2000', C.cyan);
@@ -5013,13 +5032,19 @@ function drawLift(){
 
   // —— ④ 槽壁 + 高架钢丝导轨：槽壁把滑道两侧"立"起来，钢丝再抬在槽壁顶 ——
   //    侧壁(竖直面) + 顶部亮钢丝 = 一条有深度的 U 型槽，而非贴地彩带。
+  /* 末段收束：槽壁与钢丝在接近二层时高度归零、贴回顶面。 */
+  const jFade = function (t){
+    if (t < 0.84) return 1;
+    const k = Math.min(1, (t - 0.84) / 0.16);
+    return 1 - k * k * (3 - 2 * k);
+  };
   const RAIL_H = 6;
   for (const side of [-1, 1]){
     const floor = [], rail = [];
     for (let k = 0; k <= 60; k++){
       const t = k / 60, f = rampFrame(t), off = (rampHalfW(t) - 1) * side;
       const x = f.x + f.nx * off, y = f.y + f.ny * off;
-      floor.push([x, y]); rail.push([x, y - RAIL_H]);
+      floor.push([x, y]); rail.push([x, y - RAIL_H * jFade(t)]);
     }
     // 槽侧壁：floor 边 → rail 边的竖直四边形带
     ctx.beginPath();
@@ -5047,8 +5072,8 @@ function drawLift(){
     }
   }
 
-  // —— ⑤ 梯式横档 + 铆钉：把两条导轨连成"桥" ——
-  for (let k = 3; k <= 57; k += 4){
+  // —— ⑤ 梯式横档 + 铆钉：末段收束后不再横跨 ——
+  for (let k = 3; k <= 48; k += 4){
     const t = k / 60, f = rampFrame(t), hw = rampHalfW(t) - 1;
     ctx.strokeStyle = 'rgba(120,150,200,.5)'; ctx.lineWidth = 1.3;
     ctx.beginPath();
@@ -5102,23 +5127,24 @@ function drawLift(){
   ctx.beginPath(); ctx.moveTo(4, -4); ctx.lineTo(-2, 0); ctx.lineTo(4, 4); ctx.stroke();
   ctx.restore();
 
-  // —— ⑨ 与二层的衔接口：穿透二层顶面的暗腔 + 上缘受光唇 + 伸入过渡区的引导轨 ——
-  //    桥末端不再"碰到"二层边缘就停，而是开一个口插进顶面，读作同一组件的入口喉道。
+  // —— ⑨ 与二层的喉口：喇叭状扩张 + 暗腔 + 受光唇 + 引导轨 ——
   const jf = rampFrame(1);
   ctx.save();
   ctx.translate(jf.x, jf.y);
-  const mg = ctx.createLinearGradient(0, -8, 0, 10);
-  mg.addColorStop(0, '#000000'); mg.addColorStop(0.7, '#04070e'); mg.addColorStop(1, '#101a30');
-  ctx.fillStyle = mg;
-  ctx.beginPath(); ctx.ellipse(0, 2, 13, 8, 0, 0, 6.2832); ctx.fill();
-  ctx.strokeStyle = 'rgba(196,224,255,.6)'; ctx.lineWidth = 1.4;
-  ctx.beginPath(); ctx.ellipse(0, 2, 13, 8, 0, Math.PI, 6.2832); ctx.stroke();
-  ctx.strokeStyle = 'rgba(168,198,240,.8)'; ctx.lineWidth = 2; ctx.lineCap = 'round';
-  ctx.beginPath(); ctx.moveTo(-9, 6); ctx.quadraticCurveTo(-13, 22, -14, 40); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(9, 6); ctx.quadraticCurveTo(13, 22, 14, 40); ctx.stroke();
-  ctx.strokeStyle = 'rgba(235,248,255,.5)'; ctx.lineWidth = 0.8;
-  ctx.beginPath(); ctx.moveTo(-9, 5); ctx.quadraticCurveTo(-13, 21, -14, 39); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(9, 5); ctx.quadraticCurveTo(13, 21, 14, 39); ctx.stroke();
+  ctx.rotate(Math.atan2(jf.dy, jf.dx));
+  const mw = rampHalfW(1) + 2;
+  // 喉口 = 一个"张开的暗腔"：椭圆 + 极淡的张口渐变，不描硬边。
+  // （试过画实心喇叭，边缘会读成一块补丁；这里用柔和渐变，视觉上只是桥口变暗。）
+  const fg = ctx.createRadialGradient(0, 0, 1, 0, 0, mw + 7);
+  fg.addColorStop(0, 'rgba(2,5,12,.95)');
+  fg.addColorStop(0.72, 'rgba(6,12,26,.80)');
+  fg.addColorStop(1, 'rgba(10,18,38,0)');
+  ctx.fillStyle = fg;
+  ctx.beginPath(); ctx.ellipse(0, 0, mw + 7, mw + 3, 0, 0, 6.2832); ctx.fill();
+  // 上缘一道细受光唇：只在上半圈，读作"洞口边沿被灯照到"
+  ctx.strokeStyle = 'rgba(200,226,255,.46)'; ctx.lineWidth = 1.3;
+  ctx.beginPath(); ctx.ellipse(0, 0, mw + 5, mw + 1.5, 0, Math.PI * 1.05, Math.PI * 1.95); ctx.stroke();
+  ctx.restore();
   ctx.restore();
 
   ctx.restore();
