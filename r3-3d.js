@@ -199,10 +199,16 @@ let TILT_DEG = 24;
     return c;
   }
 
-  /* 把一层烘焙图做成一块面片（整张 480x800 → 世界 4.8x8） */
+  /* 把一层烘焙图做成一块面片（整张 480x800）。
+     !!! 长度必须乘 WZ_K !!!
+     24° 斜视会把纵深压 cos24°=0.9135，所以世界 Z 要预拉伸 1/cos24°，
+     投影回来才是 1:1（逻辑 1px = 屏幕 1px）。高度只写 8 的话，
+     底图会被压成 0.9135 倍：中心对齐、上下各差 ~35px，
+     于是「2D 层画的挡板/二层」与「底图画的墙体/弹射器」永远差半个身位。
+     project() 用的是 wz()（含 WZ_K），两边必须同口径。 */
   function addLayer(canvas, z, order, opacity) {
     const tex = makeTexFromCanvas(canvas);
-    const geo = new THREE.PlaneGeometry(4.8, 8, 1, 1);
+    const geo = new THREE.PlaneGeometry(4.8, 8 * WZ_K, 1, 1);
     const mat = new THREE.MeshBasicMaterial({
       map: tex,
       transparent: true,
@@ -307,6 +313,10 @@ let TILT_DEG = 24;
         })
       );
       body.position.set(wx(b.x), BODY_H / 2, wz(b.y));
+      /* 纵深预拉伸：24° 斜视会把世界 Z 压 cos24°，圆柱在屏幕上就变成纵向压扁的椭圆。
+         wz() 已经把位置拉回来了，但几何自身的半径还在世界 Z 上是原值，
+         所以几何也要按同口径拉伸，屏幕上才是一个正圆（与底图的圆形图案重合）。 */
+      body.scale.z = WZ_K;
       body.renderOrder = 38;
       scene.add(body);
       // 侧面一圈本色发光（读作霓虹环）
@@ -315,6 +325,7 @@ let TILT_DEG = 24;
         new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.9 })
       );
       ring.rotation.x = Math.PI / 2;
+      ring.scale.y = WZ_K;      // rot.x=π/2 后局部 y = 世界 z
       ring.position.set(wx(b.x), BODY_H, wz(b.y));
       ring.renderOrder = 40;
       scene.add(ring);
@@ -326,6 +337,7 @@ let TILT_DEG = 24;
           new THREE.MeshBasicMaterial({ map: capTex, transparent: true, depthWrite: false })
         );
         cap.rotation.x = -Math.PI / 2;
+        cap.scale.y = WZ_K;     // 同上：局部 y = 世界 z，正圆才不被压扁
         cap.position.set(wx(b.x), BODY_H + 0.001, wz(b.y));
         cap.renderOrder = 41;
         scene.add(cap);
@@ -402,7 +414,7 @@ let TILT_DEG = 24;
       );
       sp.rotation.x = -Math.PI / 2;
       sp.visible = false;
-      sp.scale.set(0.42, 0.42, 1);
+      sp.scale.set(0.42, 0.42 * WZ_K, 1);   // 局部 y = 世界 z，投影回来才是正圆
       sp.renderOrder = 60;
       scene.add(sp);
       ballShadows.push(sp);
