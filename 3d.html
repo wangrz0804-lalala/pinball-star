@@ -6956,12 +6956,17 @@ requestAnimationFrame(loop);
 window.__PS = {
   // 3D 版额外导出（仅本文件）：3D 渲染层需要坡道/二层高度、粒子与飘字
   RAMP: RAMP, DECK3D: DECK3D, pops: pops, parts: parts, CAM: CAM,
+  // 3D 层需要按层重绘挡板（会转动），必须导出
+  drawFlippers: drawFlippers,
   ZONES: ZONES, SPOTS: SPOTS, RING: RING, WORMS: WORMS, FLAGS: FLAGS,
   /* 把原版台面的**静态装饰**烘成一张贴图 —— 3D 台面直接用它，
      这样台面的视觉 100% 是原版那套（分区/刻线/铭牌/装饰全在），
      3D 只负责球、缓冲器、挡板这些需要立体感的实体。 */
-  bakeTable: function (scale) {
-    const sc = scale || 2;
+  /* 按"层"烘焙原版 2D 绘制：每一层都是原版画出来的成品图，
+     3D 只负责把它放到不同高度上 —— 这是原版 Space Cadet 的做法
+     （2D 背景位图 + 精灵 + z 深度图 + 透视矩阵），而不是把美术重建成几何体。 */
+  bake: function (which, scale) {
+    const sc = scale || 1.5;
     const c = document.createElement('canvas');
     c.width = Math.round(480 * sc);
     c.height = Math.round(800 * sc);
@@ -6970,29 +6975,36 @@ window.__PS = {
     const saved = ctx;
     ctx = g;
     try {
-      // 底色必须先铺：原版 render() 是先在 drawBackground 里铺满深空渐变，
-      // 再叠装饰层。漏掉这步，烘焙图就只有"光"没有"底"，贴到 3D 上会发白。
-      g.fillStyle = GUTTER;
-      g.fillRect(0, 0, 480, 800);
-      drawBgGradients();
-      drawPlayfieldDeco();
-      drawTableLight();
-      drawZones();
-      drawDrainZone();
-      drawWalls();
-      drawFuelLights();
-      drawSlings();
-      drawOutGates();
-      drawPosts();
-      drawDock();
-      drawBlackHole();
-      drawRankRing();
-      drawWorms();
-      drawFlags();
-      drawWarpLink();
-      drawSpotNames();
+      if (which === 'base') {
+        // 先铺深空底色与星云（原版 render() 由 drawBackground 铺，装饰层叠在上面）
+        g.fillStyle = GUTTER; g.fillRect(0, 0, 480, 800);
+        drawBgGradients();
+        // 静态星点：原版是动画的，这里按固定伪随机铺一层，视觉一致
+        try {
+          var seed = 20261125;
+          function rnd(){ seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; }
+          for (var i = 0; i < 170; i++){
+            var sx2 = rnd() * 480, sy2 = rnd() * 800, rr2 = 0.5 + rnd() * 1.5;
+            g.globalAlpha = 0.25 + rnd() * 0.6;
+            g.fillStyle = rnd() < 0.25 ? '#9fd8ff' : '#ffffff';
+            g.beginPath(); g.arc(sx2, sy2, rr2, 0, 6.2832); g.fill();
+          }
+          g.globalAlpha = 1;
+        } catch (e0) {}
+        drawPlayfieldDeco(); drawTableLight(); drawZones(); drawDrainZone();
+        drawWalls(); drawFuelLights(); drawOutGates(); drawPosts();
+        drawDock(); drawBlackHole(); drawRankRing(); drawWorms();
+        drawFlags(); drawWarpLink(); drawGate();
+        drawLaneLamps(); drawMissionLamps(); drawSpotNames(); drawSpotMarker();
+      } else if (which === 'slings') { drawSlings(); }
+      else if (which === 'bumpers') { drawBumpers(); }
+      else if (which === 'flip') { drawFlippers(); }
+      else if (which === 'plunger') { drawPlunger(); drawDeployGauge(); }
+      else if (which === 'deckUnder') { drawDeckUnder(); }
+      else if (which === 'deck') { drawDeckTop(); drawDeckModules(); }
+      else if (which === 'ramp') { drawLift(); }
     } catch (e) {
-      try { console.log('bakeTable partial: ' + e.message); } catch (e2) {}
+      try { console.log('bake(' + which + ') partial: ' + e.message); } catch (e2) {}
     } finally {
       ctx = saved;
     }
