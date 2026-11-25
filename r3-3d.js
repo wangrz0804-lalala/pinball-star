@@ -28,7 +28,7 @@
   const hz = h => (h || 0) * S;
   // 2D 版的"抬升 52px"是视觉位移，不是真实物理高度；压缩后既保纵深又不挡后方台面。
   // 球/二层/坡道共用同一系数，保证球始终贴在平台表面上。
-  const HSCALE = 0.62;
+  const HSCALE = 0.50;
   const hzS = h => (h || 0) * S * HSCALE;
 
   // 相机倾角：原版矩阵约 24°，但我们的美术是为"正俯视"画的，
@@ -49,8 +49,7 @@
   const ballShadows = [];
   let shadowTex = null, glowTex = null;
   const bumperPops = [];
-  let flipCanvas = null, flipTex = null, flipCtx = null;
-  const flipScale = 2;
+  const flipperMeshes = [];      // {g, f, glow, body, core, ring}
   // 挡板占用区域（逻辑坐标）：两支挡板 + 转轴 + 一点点余量
   const FLIP_RECT = { x: 50, y: 620, w: 380, h: 170 };
   let ready = false;
@@ -203,6 +202,58 @@
       ));
     })();
 
+    /* ---------- ⓪ 实体侧墙 ----------
+       2D 版墙体 = 深色厚墙（22px 暗底 + 16px 蓝调） + 顶部 2px 霓虹棱线。
+       这里照这个结构做实体：墙身是深色金属（不发光，否则就成白带），
+       只有顶棱是一条细亮线 —— 这正是 3D 感与保真度的平衡点。 */
+    (function () {
+      const walls = PS.WALLS || [];
+      if (!walls.length) return;
+      const WALL_H = 0.052;              // 墙高：低矮橡胶挡条，不是高墙
+      const bodyMat = new THREE.MeshStandardMaterial({
+        color: 0x161f46,                 // 对应 2D 的 #1c2650 系深色
+        emissive: 0x1b2f66,
+        emissiveIntensity: 0.20,         // 极弱：只给一点存在感，绝不抢台面
+        roughness: 0.34,
+        metalness: 0.88
+      });
+      const box = new THREE.BoxGeometry(1, 1, 1);
+      const inst = new THREE.InstancedMesh(box, bodyMat, walls.length);
+      const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(),
+            p3 = new THREE.Vector3(), s3 = new THREE.Vector3(),
+            axisY = new THREE.Vector3(0, 1, 0);
+      // 顶棱：2D 里是一条 2px 霓虹线。3D 里 1px 的 Line 没有宽度、几乎看不见，
+      // 所以做成"细长条"实体（有宽度，能受光并投出高光），这才是 2D 那条棱线的对应物。
+      const rimMat = new THREE.MeshBasicMaterial({
+        color: 0x8cc0ff, transparent: true, opacity: 0.9
+      });
+      const rimInst = new THREE.InstancedMesh(box, rimMat, walls.length);
+      const rimPts = [];
+      for (let i = 0; i < walls.length; i++) {
+        const w = walls[i];
+        const dx = (w.bx - w.ax) * S, dz = (w.by - w.ay) * S;
+        const len = Math.hypot(dx, dz) || 0.001;
+        q.setFromAxisAngle(axisY, Math.atan2(-dz, dx));
+        const wId = Math.max(0.055, w.r * 2 * S * 0.92);
+        p3.set(wx((w.ax + w.bx) / 2), WALL_H / 2, wz((w.ay + w.by) / 2));
+        s3.set(len + wId * 0.5, WALL_H, wId);
+        m4.compose(p3, q, s3);
+        inst.setMatrixAt(i, m4);
+        // 顶棱细条：压在墙顶正中，宽 0.010、高 0.005
+        const rp = new THREE.Vector3(wx((w.ax + w.bx) / 2), WALL_H + 0.0015, wz((w.ay + w.by) / 2));
+        const rs = new THREE.Vector3(len + wId * 0.5, 0.005, 0.010);
+        m4.compose(rp, q, rs);
+        rimInst.setMatrixAt(i, m4);
+      }
+      inst.instanceMatrix.needsUpdate = true;
+      inst.renderOrder = 8;
+      scene.add(inst);
+
+      rimInst.instanceMatrix.needsUpdate = true;
+      rimInst.renderOrder = 9;
+      scene.add(rimInst);
+    })();
+
     /* ---------- ① 台面底层（原版 2D 全部静态层）---------- */
     // 烘焙分辨率：按物理像素 1:1（DPR×480）出图，避免透视重采样后发虚
     const BAKESCALE = Math.max(2, Math.min(4, Math.ceil((window.devicePixelRatio || 1))));
@@ -276,62 +327,244 @@
       });
     })();
 
-    /* ---------- ③ 挡板：每帧重绘（会转动）----------
-       只烘焙"挡板所在的小矩形"，每帧纹理上传 ~0.5MB 而不是整屏 3.4MB。 */
-    (function () {
-      flipCanvas = document.createElement('canvas');
-      flipCanvas.width = Math.round(FLIP_RECT.w * flipScale);
-      flipCanvas.height = Math.round(FLIP_RECT.h * flipScale);
-      flipCtx = flipCanvas.getContext('2d');
-      flipTex = makeTexFromCanvas(flipCanvas);
-      const geo = new THREE.PlaneGeometry(FLIP_RECT.w * S, FLIP_RECT.h * S, 1, 1);
-      const mat = new THREE.MeshBasicMaterial({
-        map: flipTex, transparent: true, depthWrite: false, side: THREE.DoubleSide
-      });
-      const m = new THREE.Mesh(geo, mat);
-      m.rotation.x = -Math.PI / 2;
-      // 挡板会与球发生碰撞，位置必须与物理完全一致 → z=0
-      m.position.set(wx(FLIP_RECT.x + FLIP_RECT.w / 2), 0, wz(FLIP_RECT.y + FLIP_RECT.h / 2));
-      m.renderOrder = 30;
-      scene.add(m);
-    })();
+    /* ---------- ③ 挡板：实体几何，绕转轴真实旋转 ----------
+       严格照 2D 的视觉语言做分层：
+         · 2D 是 shadowBlur 外发光 + 17px 亮描边 + 11px 深色棒 + 3.5px 亮内芯 + 转轴圆
+         · 3D 就做  外辉光柱 + 深色棒体（带本色自发光）+ 顶部亮内芯 + 转轴柱与环
+       按下时整体由蓝转品红（对应 2D 的 #84bcff → #ff9ee8）。 */
+    flipperMeshes.length = 0;
+    [PS.leftF, PS.rightF].forEach(function (f) {
+      if (!f) return;
+      const lenW = f.len * S;
+      const g = new THREE.Group();
+      g.position.set(wx(f.px), 0, wz(f.py));
 
-    /* ---------- ④ 坡道：按高度切片，做出真实的抬升 ---------- */
+      /* 2D 的霓虹描边是"沿棒外形的一圈亮线"。3D 里用两根细棱条实现：
+         俯视时正好落在棒的上下两侧，读作描边；同时棒体保持深色不被染白。
+         （之前用加色辉光柱会把整根棒冲淡，丢掉 2D 的深色棒对比。） */
+      const glowMat = new THREE.MeshBasicMaterial({
+        color: 0x6fb8ff, transparent: true, opacity: 1
+      });
+      const glowGroup = new THREE.Group();
+      // 棱条必须落在棒体**表面**上：棒半径 0.052、中心 y=0.055，
+      // 在 z=±0.040 处表面高度约 0.088，棱条就压在这条线上。
+      [-1, 1].forEach(function (sd) {
+        const eg = new THREE.BoxGeometry(lenW * 0.99, 0.011, 0.011);
+        eg.translate(lenW / 2, 0, 0);
+        const e = new THREE.Mesh(eg, glowMat);
+        e.position.set(0, 0.092, sd * 0.040);
+        e.renderOrder = 29;
+        glowGroup.add(e);
+      });
+      g.add(glowGroup);
+
+      // 柔和外晕：大范围、极低不透明度，只在棒周围形成一层光雾。
+      // 作用是加强"深色棒 vs 亮背景"的对比（2D 的 shadowBlur 就是这个观感）。
+      const hazeGeo = new THREE.CylinderGeometry(0.145, 0.145, lenW * 1.02, 16, 1, true);
+      hazeGeo.rotateZ(Math.PI / 2);
+      hazeGeo.translate(lenW / 2, 0, 0);
+      const hazeMat = new THREE.MeshBasicMaterial({
+        color: 0x2f6fd8, transparent: true, opacity: 0.13,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide
+      });
+      const haze = new THREE.Mesh(hazeGeo, hazeMat);
+      haze.position.y = 0.048;
+      haze.renderOrder = 27;
+      g.add(haze);
+
+      // 棒体：深色金属（对应 2D 的 #0c1430、11px）
+      const bodyGeo = new THREE.CylinderGeometry(0.052, 0.052, lenW, 18);
+      bodyGeo.rotateZ(Math.PI / 2);
+      bodyGeo.translate(lenW / 2, 0, 0);
+      // 用 Basic 而非 Standard：2D 的棒体就是纯色 #0c1430，
+      // 一旦交给 PBR 就会被点光照成灰白，丢掉那种"深色棒 + 霓虹描边"的对比。
+      const bodyMat = new THREE.MeshBasicMaterial({ color: 0x0c1430 });
+      const body = new THREE.Mesh(bodyGeo, bodyMat);
+      body.position.y = 0.053;
+      body.renderOrder = 30;
+      g.add(body);
+
+      // 内芯亮线（对应 2D 的 3.5px #d8edff 细线，压在棒顶）
+      const coreGeo = new THREE.CylinderGeometry(0.009, 0.009, lenW * 0.97, 10);
+      coreGeo.rotateZ(Math.PI / 2);
+      coreGeo.translate(lenW / 2, 0, 0);
+      const coreMat = new THREE.MeshBasicMaterial({
+        color: 0xd8edff, transparent: true, opacity: 0.92
+      });
+      const core = new THREE.Mesh(coreGeo, coreMat);
+      core.position.y = 0.101;
+      core.renderOrder = 31;
+      g.add(core);
+
+      // 转轴：深色柱 + 霓虹环（2D 的 8px 圆 + 2px 描边）
+      const piv = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.072, 0.072, 0.098, 22),
+        new THREE.MeshBasicMaterial({ color: 0x16204a })
+      );
+      piv.position.y = 0.056;
+      piv.renderOrder = 30;
+      g.add(piv);
+
+      const ringGeo = new THREE.TorusGeometry(0.072, 0.0085, 8, 26);
+      ringGeo.rotateX(Math.PI / 2);
+      const ringMat = new THREE.MeshBasicMaterial({
+        color: 0x5a9cff, transparent: true, opacity: 0.9
+      });
+      const ring = new THREE.Mesh(ringGeo, ringMat);
+      ring.position.y = 0.100;
+      ring.renderOrder = 32;
+      g.add(ring);
+
+      scene.add(g);
+      flipperMeshes.push({ g: g, f: f, glow: glowMat, body: bodyMat, core: coreMat, ring: ringMat, haze: hazeMat });
+    });
+
+    /* ---------- ④ 坡道：实体槽（槽底 + 侧壁 + 银轨 + 黄带）----------
+       2D 坡道 = 半透明槽底 + 两侧立壁 + 三层描边钢轨 + 立柱/横档 + 黄色标识带。
+       这里照同一套结构做实体：斜视时能看到真实的槽内壁与轨道高度，而不是一张贴纸。
+       中心线与高度曲线直接复用物理（PS.rampPoint / PS.rampH），保证球贴在槽里。 */
     (function () {
-      let cvR = null;
-      try { cvR = PS.bake('ramp', BAKESCALE); } catch (e) { cvR = null; }
-      if (!cvR) return;
-      const N = 30;
-      const H = (PS.DECK3D ? PS.DECK3D.z : 52);
-      const tex = makeTexFromCanvas(cvR);
-      // 坡道整体投影：贴着台面铺一层，让"桥"读作架空的
-      try {
-        const rsh = makeShadowLayer(cvR, BAKESCALE * 4, 0.5);
-        const rshLayer = addLayer(rsh, 0, 33);
-        rshLayer.position.set(0.04, 0.002, 0.06);
-      } catch (e) {}
-      const sh = 1 / N;
-      for (let i = 0; i < N; i++) {
-        const t0 = i / N, t1 = (i + 1) / N;
-        const tc = (t0 + t1) / 2;
-        const geo = new THREE.PlaneGeometry(4.8, 8 * sh, 1, 1);
-        const uv = geo.attributes.uv;
-        for (let k = 0; k < uv.count; k++) {
-          const v = uv.getY(k);
-          uv.setY(k, 1 - t1 + v * sh);
-        }
-        uv.needsUpdate = true;
-        const mat = new THREE.MeshBasicMaterial({
-          map: tex, transparent: true, depthWrite: false, side: THREE.DoubleSide
+      const ramp = PS.RAMP;
+      if (!ramp || !PS.rampPoint) return;
+
+      const N = 64;
+      const DECK_H = (PS.DECK3D ? PS.DECK3D.z : 52);
+
+      // 采样中心线（含法向、半宽、抬升）
+      const F = [];
+      for (let i = 0; i <= N; i++) {
+        const t = i / N;
+        const p = PS.rampPoint(t);
+        const p2 = PS.rampPoint(Math.min(1, t + 0.006));
+        let dx = p2.x - p.x, dy = p2.y - p.y;
+        const dl = Math.hypot(dx, dy) || 1;
+        dx /= dl; dy /= dl;
+        F.push({
+          t: t,
+          x: p.x, y: p.y,
+          nx: -dy, ny: dx,
+          hw: PS.rampHalfW(t),
+          h: PS.rampH(t)
         });
-        const m = new THREE.Mesh(geo, mat);
-        m.rotation.x = -Math.PI / 2;
-        const yc = 800 * tc;                       // 该带的逻辑 y（0=顶部）
-        const hh = H * Math.pow(tc, 1.35);         // 越靠顶部抬得越高
-        m.position.set(0, hzS(hh + 2), wz(yc));
+      }
+
+      const vertToWorld = function (f, side, extraW, extraH) {
+        const w = (f.hw + (extraW || 0)) * side;
+        return new THREE.Vector3(
+          wx(f.x + f.nx * w),
+          hzS(f.h + (extraH || 0)),
+          wz(f.y + f.ny * w)
+        );
+      };
+
+      /* —— 槽底 —— */
+      (function () {
+        const verts = [], idx = [], uvs = [];
+        for (let i = 0; i <= N; i++) {
+          const f = F[i];
+          const L = vertToWorld(f, -1, 0, 0);
+          const R = vertToWorld(f, 1, 0, 0);
+          verts.push(L.x, L.y, L.z, R.x, R.y, R.z);
+          uvs.push(0, f.t, 1, f.t);
+          if (i < N) {
+            const a = i * 2;
+            idx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3);
+          }
+        }
+        const g = new THREE.BufferGeometry();
+        g.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+        g.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+        g.setIndex(idx);
+        g.computeVertexNormals();
+        const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
+          color: 0x080e1e, transparent: true, opacity: 0.97,
+          side: THREE.DoubleSide, depthWrite: false
+        }));
+        m.renderOrder = 34;
+        scene.add(m);
+      })();
+
+      /* —— 两侧槽壁：从槽底向上立起（这是"槽"的核心）—— */
+      [-1, 1].forEach(function (side) {
+        const verts = [], idx = [];
+        const WALL_H = 0.078;
+        for (let i = 0; i <= N; i++) {
+          const f = F[i];
+          const b = vertToWorld(f, side, 0, 0);
+          const tp = b.clone(); tp.y += WALL_H;
+          verts.push(b.x, b.y, b.z, tp.x, tp.y, tp.z);
+          if (i < N) {
+            const a = i * 2;
+            // 内侧面朝向槽内，双侧可见更稳
+            idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+          }
+        }
+        const g = new THREE.BufferGeometry();
+        g.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+        g.setIndex(idx);
+        g.computeVertexNormals();
+        const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
+          color: 0x2c4384, transparent: true, opacity: 0.95,
+          side: THREE.DoubleSide, depthWrite: false
+        }));
         m.renderOrder = 35;
         scene.add(m);
-      }
+      });
+
+      /* —— 银轨：沿两侧槽壁顶端的细亮线（2D 的 3 层描边导轨）—— */
+      [-1, 1].forEach(function (side) {
+        const pts = [];
+        for (let i = 0; i <= N; i += 2) {
+          const p = vertToWorld(F[i], side, 0, 0);
+          pts.push(new THREE.Vector3(p.x, p.y + 0.080, p.z));
+        }
+        scene.add(new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints(pts),
+          new THREE.LineBasicMaterial({ color: 0xc8dcff, transparent: true, opacity: 0.9 })
+        ));
+      });
+
+      /* —— 黄色标识带：2D 在 t=0.22/0.30/0.40/0.50/0.60 处的 5 条横带 ——
+         直接用"槽底局部切片"生成，天然横跨槽面并贴合曲率。
+         （用旋转 Box 会因朝向轴算错而退化成沿槽细线 —— 踩过。） */
+      const bandMat = new THREE.MeshBasicMaterial({
+        color: 0xffce54, transparent: true, opacity: 0.95, side: THREE.DoubleSide
+      });
+      [0.22, 0.30, 0.40, 0.50, 0.60].forEach(function (tt) {
+        const half = 0.018;                 // 沿槽方向半宽：合计约 3.6 逻辑 px
+        const t0 = Math.max(0, tt - half), t1 = Math.min(1, tt + half);
+        const verts = [], idx = [];
+        let vi = 0;
+        for (let k = 0; k <= 2; k++) {
+          const t = t0 + (t1 - t0) * k / 2;
+          const i2 = Math.round(t * N);
+          const f = F[i2];
+          if (!f) continue;
+          const L = vertToWorld(f, -1, -3.0, 1.2);
+          const R = vertToWorld(f, 1, -3.0, 1.2);
+          verts.push(L.x, L.y, L.z, R.x, R.y, R.z);
+          if (k < 2) { idx.push(vi, vi + 2, vi + 1, vi + 1, vi + 2, vi + 3); }
+          vi += 2;
+        }
+        if (!idx.length) return;
+        const bg = new THREE.BufferGeometry();
+        bg.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+        bg.setIndex(idx);
+        bg.computeVertexNormals();
+        const band = new THREE.Mesh(bg, bandMat);
+        band.renderOrder = 36;
+        scene.add(band);
+      });
+
+      /* —— 架空感：整条坡道在台面上的投影 —— */
+      try {
+        const cvR2 = PS.bake('ramp', BAKESCALE);
+        if (cvR2) {
+          const rsh = makeShadowLayer(cvR2, BAKESCALE * 4, 0.5);
+          const rshLayer = addLayer(rsh, 0, 33);
+          rshLayer.position.set(0.04, 0.002, 0.06);
+        }
+      } catch (e) {}
     })();
 
     /* ---------- ⑤ 二层：阴影层 + 平台层 ---------- */
@@ -431,18 +664,6 @@
   // 物理高度 → 世界高度（统一压缩，保证球贴在平台上）
   const worldH = h => hzS(h);
 
-  function redrawFlippers() {
-    if (!flipCtx || !PS.drawInto) return false;
-    const g = flipCtx;
-    g.setTransform(1, 0, 0, 1, 0, 0);
-    g.clearRect(0, 0, flipCanvas.width, flipCanvas.height);
-    // 平移到该子区域，使全局坐标绘制正确落在小画布上
-    g.setTransform(flipScale, 0, 0, flipScale, -FLIP_RECT.x * flipScale, -FLIP_RECT.y * flipScale);
-    PS.drawInto(g, 'flip');
-    flipTex.needsUpdate = true;
-    return true;
-  }
-
   function frame() {
     if (!ready) return;
 
@@ -472,7 +693,21 @@
       shm.scale.set(k, k, 1);
     }
 
-    redrawFlippers();
+    // 挡板：绕转轴真实旋转；按下时蓝→品红（对应 2D 的颜色切换）
+    for (let i = 0; i < flipperMeshes.length; i++) {
+      const fm = flipperMeshes[i];
+      fm.g.rotation.y = -fm.f.angle;
+      const pressed = !!fm.f.pressed;
+      fm.glow.color.setHex(pressed ? 0xff7ee0 : 0x5a9cff);
+      fm.glow.opacity = 1;
+      if (fm.haze) {
+        fm.haze.color.setHex(pressed ? 0xd8409c : 0x2f6fd8);
+        fm.haze.opacity = pressed ? 0.20 : 0.13;
+      }
+      fm.core.color.setHex(pressed ? 0xffe6f9 : 0xd8edff);
+      fm.ring.color.setHex(pressed ? 0xff5ecb : 0x5a9cff);
+      fm.body.color.setHex(pressed ? 0x3a1030 : 0x0c1430);
+    }
 
     for (let i = 0; i < bumperPops.length; i++) {
       const bp = bumperPops[i];
@@ -578,6 +813,22 @@
   }
 
   function driveIfAsked() {
+    // #ride：把球摆到坡道上，验证球与槽底的贴合（高度/宽度是否正确）
+    if (location.hash.indexOf('#ride') >= 0) {
+      const m = /ride=(\d+)/.exec(location.hash);
+      const t = m ? Math.min(1, Math.max(0, parseInt(m[1], 10) / 100)) : 0.45;
+      PS.restart('classic');
+      PS.state.paused = false;
+      PS.state.mode = 'play';
+      const b = PS.balls && PS.balls[0];
+      if (b && PS.rampPoint) {
+        const p = PS.rampPoint(t);
+        b.x = p.x; b.y = p.y;
+        b.rampT = t; b.rampZ = PS.rampH(t);
+        b.vx = 0; b.vy = 0; b.hidden = false;
+      }
+      return;
+    }
     if (location.hash !== '#auto3d') return;
     const st = PS.state;
     PS.restart('classic');
