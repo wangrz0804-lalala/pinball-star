@@ -6630,6 +6630,11 @@ function render(){
 
   }
 
+  if (use3D) {
+    try { window.__PS.drawDyn(); }
+    catch (e) { try { console.log('drawDyn: ' + e.message); } catch (e2) {} }
+  }
+
   drawOverlays();
 
   if (!use3D && state.flash > 0){
@@ -6663,7 +6668,7 @@ function render(){
     }
   }
 
-  if (!use3D && !window.__PS_VIEW){
+  if (!window.__PS_VIEW){
     const vg = ctx.createRadialGradient(240, 400, 200, 240, 400, 520);
     vg.addColorStop(0, 'rgba(0,0,0,0)');
     vg.addColorStop(1, 'rgba(0,0,0,.45)');
@@ -6979,6 +6984,8 @@ window.__PS = {
   /* 按"层"烘焙原版 2D 绘制：每一层都是原版画出来的成品图，
      3D 只负责把它放到不同高度上 —— 这是原版 Space Cadet 的做法
      （2D 背景位图 + 精灵 + z 深度图 + 透视矩阵），而不是把美术重建成几何体。 */
+  /* 静态底图：只有真正不动的东西（星空/台面装饰/台面光照/墙体/油量灯/蓄力刻度）。
+     所有会动的元素一律由 drawDyn 逐帧用原版函数绘制 —— 这样细节零丢失、动画不冻结。 */
   bake: function (which, scale) {
     const sc = scale || 1.5;
     const c = document.createElement('canvas');
@@ -6990,10 +6997,8 @@ window.__PS = {
     ctx = g;
     try {
       if (which === 'base') {
-        // 先铺深空底色与星云（原版 render() 由 drawBackground 铺，装饰层叠在上面）
         g.fillStyle = GUTTER; g.fillRect(0, 0, 480, 800);
         drawBgGradients();
-        // 静态星点：原版是动画的，这里按固定伪随机铺一层，视觉一致
         try {
           var seed = 20261125;
           function rnd(){ seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; }
@@ -7005,24 +7010,67 @@ window.__PS = {
           }
           g.globalAlpha = 1;
         } catch (e0) {}
-        drawPlayfieldDeco(); drawTableLight(); drawZones(); drawDrainZone();
-        drawWalls(); drawFuelLights(); drawOutGates(); drawPosts();
-        drawDock(); drawBlackHole(); drawRankRing(); drawWorms();
-        drawFlags(); drawWarpLink(); drawGate();
-        drawLaneLamps(); drawMissionLamps(); drawSpotNames(); drawSpotMarker();
-      } else if (which === 'slings') { drawSlings(); }
-      else if (which === 'bumpers') { drawBumpers(); }
-      else if (which === 'flip') { drawFlippers(); }
-      else if (which === 'plunger') { drawPlunger(); drawDeployGauge(); }
-      else if (which === 'deckUnder') { drawDeckUnder(); }
-      else if (which === 'deck') { drawDeckTop(); drawDeckModules(); }
-      else if (which === 'ramp') { drawLift(); }
+        drawPlayfieldDeco();
+        drawTableLight();
+        drawWalls();
+        drawFuelLights();
+        drawDeployGauge();
+      }
     } catch (e) {
       try { console.log('bake(' + which + ') partial: ' + e.message); } catch (e2) {}
     } finally {
       ctx = saved;
     }
     return c;
+  },
+
+  /* 动态细节层：**严格按 2D render() 的调用顺序**，全部用原版绘制函数逐帧绘制。
+     这条链路保证"2D 里有的每一处细节、每一个动画"在 3D 版里都有，且位置一致。 */
+  drawDyn: function () {
+    drawZones();
+    drawDrainZone();
+    drawPlunger();
+    drawSlings();
+    drawPosts();
+    drawOutGates();
+    drawFlippers();
+    drawBumpers();
+    drawDock();
+    drawBlackHole();
+    drawRankRing();
+    drawWorms();
+    drawFlags();
+    drawWarpLink();
+    drawDeckUnder();
+    drawDeckTop();
+    drawDeckModules();
+    drawLift();
+    drawGate();
+    drawLaneLamps();
+    drawMissionLamps();
+    drawSpotNames();
+    drawSpotMarker();
+    drawUpperShadows();
+    // 球的加色拖尾（原版 drawBallOne 的离子尾迹；3D 球体只替代球本身）
+    const trailC = (TRAILS[state.profile.trail] || TRAILS.none).c;
+    for (let bi = 0; bi < balls.length; bi++) {
+      const b = balls[bi];
+      if (b.hidden || !b.trail || !b.trail.length) continue;
+      const lift = (b.rampT !== undefined) ? (b.rampZ || 0)
+                 : (b.deck === 'upper' ? DECK3D.z : 0);
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      for (let i = 0; i < b.trail.length; i++) {
+        const t = b.trail[i];
+        ctx.globalAlpha = (i / b.trail.length) * 0.30;
+        ctx.fillStyle = trailC;
+        ctx.beginPath();
+        ctx.arc(t.x, t.y - lift, b.r * (0.35 + 0.6 * i / b.trail.length), 0, 6.2832);
+        ctx.fill();
+      }
+      ctx.restore();
+      ctx.globalAlpha = 1;
+    }
   },
   caches: function(){ return [!!bgGradCache, !!spotNamesCache, !!deckTopCache, !!deckUnderCache, !!tableLightCache]; },
   autoPause: function(){ if (state.screen === 'play' && !state.paused){ state.paused = true; state.charging = false; } },

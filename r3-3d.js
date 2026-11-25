@@ -34,7 +34,7 @@
   const hz = h => (h || 0) * S;
   // 2D 版的"抬升 52px"是视觉位移，不是真实物理高度；压缩后既保纵深又不挡后方台面。
   // 球/二层/坡道共用同一系数，保证球始终贴在平台表面上。
-  const HSCALE = 0.50;
+  const HSCALE = 1.0;
   const hzS = h => (h || 0) * S * HSCALE;
   /* 坡道与二层**必须用同一个高度系数**：
      rampH(1) === DECK3D.z，坡道末端本来就该正好落在二层顶面。
@@ -62,10 +62,7 @@ let TILT_DEG = 24;
   let ballMesh = null, ball2Mesh = null;
   const ballShadows = [];
   let shadowTex = null, glowTex = null;
-  const bumperPops = [];
-  const flipperMeshes = [];      // {g, f, halo, edge, body, core, ring}
   let edgeGlowMat = null;
-  let deckLayerRef = null, deckShadowRef = null;
   // 挡板占用区域（逻辑坐标）：两支挡板 + 转轴 + 一点点余量
   const FLIP_RECT = { x: 50, y: 620, w: 380, h: 170 };
   let ready = false;
@@ -234,7 +231,11 @@ let TILT_DEG = 24;
        这里照这个结构做实体：墙身是深色金属（不发光，否则就成白带），
        只有顶棱是一条细亮线 —— 这正是 3D 感与保真度的平衡点。 */
     (function () {
-      const walls = PS.WALLS || [];
+      const outerOnly = function (w) {
+        const inside = function (x, y) { return x > 32 && x < 448 && y > 272 && y < 772; };
+        return !(inside(w.ax, w.ay) && inside(w.bx, w.by));
+      };
+      const walls = (PS.WALLS || []).filter(outerOnly);
       if (!walls.length) return;
       const WALL_H = 0.052;              // 墙高：低矮橡胶挡条，不是高墙
       const bodyMat = new THREE.MeshStandardMaterial({
@@ -287,379 +288,6 @@ let TILT_DEG = 24;
     try { addLayer(PS.bake('base', BAKESCALE), 0, 10); }
     catch (e) { console.log('base layer failed: ' + e.message); }
 
-    /* ---------- ② 弹射器 / 缓冲器：各自一层 ---------- */
-    // 弹射器/缓冲器与物理坐标严格对应：必须 z=0，否则会像挡板一样被透视挪位
-    try { addLayer(PS.bake('slings', BAKESCALE), 0, 20); } catch (e) {}
-    /* 缓冲器：真圆柱体，顶面用原版绘制裁出来的图案。
-       —— 美术一点没重画，但有了真实的体积、侧面受光与投影。 */
-    (function () {
-      let bumpCv = null;
-      try { bumpCv = PS.bake('bumpers', BAKESCALE); } catch (e) { bumpCv = null; }
-      if (!bumpCv) return;
-      const BODY_H = 0.115;             // 缓冲器露出一截的高度（世界单位）
-      (PS.BUMPERS || []).forEach(function (b) {
-        const col = new THREE.Color(b.c);
-        const rW = (b.r + 2) * S;
-
-        // 侧面：深色金属 + 本色自发光，斜看时有明暗过渡
-        const body = new THREE.Mesh(
-          new THREE.CylinderGeometry(rW, rW * 1.06, BODY_H, 36, 1, true),
-          new THREE.MeshStandardMaterial({
-            color: 0x101a38,
-            emissive: col.clone().multiplyScalar(0.45),
-            emissiveIntensity: 0.9,
-            roughness: 0.3,
-            metalness: 0.92,
-            side: THREE.DoubleSide
-          })
-        );
-        body.position.set(wx(b.x), BODY_H / 2, wz(b.y));
-        body.renderOrder = 38;
-        scene.add(body);
-
-        // 顶盖：从烘焙图裁出该缓冲器所在的正方形，1:1 贴到圆面上（不做任何缩放/偏移）
-        const pad = b.r + 2;
-        const sq = Math.round(pad * 2 * BAKESCALE);
-        const capCv = document.createElement('canvas');
-        capCv.width = capCv.height = sq;
-        const cg = capCv.getContext('2d');
-        cg.drawImage(bumpCv,
-          Math.round((b.x - pad) * BAKESCALE), Math.round((b.y - pad) * BAKESCALE),
-          sq, sq, 0, 0, sq, sq);
-        const capTex = new THREE.CanvasTexture(capCv);
-        capTex.encoding = THREE.LinearEncoding;
-        capTex.anisotropy = 8;
-        const cap = new THREE.Mesh(
-          new THREE.CircleGeometry(rW, 40),
-          new THREE.MeshBasicMaterial({
-            map: capTex, transparent: true, depthWrite: false
-          })
-        );
-        cap.rotation.x = -Math.PI / 2;
-        cap.position.set(wx(b.x), BODY_H, wz(b.y));
-        cap.renderOrder = 39;
-        scene.add(cap);
-
-        // 顶盖外沿一圈霓虹，补上"发光边"的读法
-        const halo = new THREE.Mesh(
-          new THREE.TorusGeometry(rW * 0.99, 0.016, 8, 40),
-          new THREE.MeshBasicMaterial({
-            color: col, transparent: true, opacity: 0.85, depthWrite: false
-          })
-        );
-        halo.rotation.x = Math.PI / 2;
-        halo.position.set(wx(b.x), BODY_H + 0.004, wz(b.y));
-        halo.renderOrder = 41;
-        scene.add(halo);
-      });
-    })();
-
-    /* ---------- ③ 挡板：实体几何 + 荧光分层 ----------
-       严格复刻 2D 的绘制分层（drawFlippers）：
-         ① 外发光（shadowBlur 16~28，加色外溢）  → 加色外晕管 + 柔光雾
-         ② 亮蓝描边（lineWidth 17）              → 亮蓝管
-         ③ 深色棒体（lineWidth 11，#0c1430）     → 深色管（压在亮蓝管上）
-         ④ 亮内芯（lineWidth 3.5，#d8edff）      → 白色细芯
-       四层同心套起来，俯视就是 2D 的"荧光边 + 深色棒 + 白芯"，
-       斜视还能看到圆柱的真实体积与受光。 */
-    flipperMeshes.length = 0;
-    [PS.leftF, PS.rightF].forEach(function (f) {
-      if (!f) return;
-      const lenW = f.len * S;
-      const g = new THREE.Group();
-      g.position.set(wx(f.px), 0, wz(f.py));
-
-      const tube = function (radius, mat, yOff, order, lenMul) {
-        const geo = new THREE.CylinderGeometry(radius, radius, lenW * (lenMul || 1), 22, 1, false);
-        geo.rotateZ(Math.PI / 2);
-        geo.translate(lenW / 2, 0, 0);
-        const m = new THREE.Mesh(geo, mat);
-        m.position.y = yOff;
-        m.renderOrder = order;
-        g.add(m);
-        return m;
-      };
-
-      /* ① 外发光：围绕棒轮廓的一圈柔光（shadowBlur 的对应物）。
-         不能做成圆柱：实心圆柱会把整根棒包住，additive 一叠就冲成白色（踩过两次）。
-         做成平铺在棒下方的拉伸柔光面 —— 只在棒体外围溢出。 */
-      const haloMat = new THREE.MeshBasicMaterial({
-        map: glowTex, color: 0x5aa4ff, transparent: true, opacity: 0.60,
-        blending: THREE.AdditiveBlending, depthWrite: false
-      });
-      const haloGeo = new THREE.PlaneGeometry(lenW * 2.1, lenW * 2.1);
-      haloGeo.rotateX(-Math.PI / 2);
-      haloGeo.translate(lenW / 2, 0, 0);
-      const halo = new THREE.Mesh(haloGeo, haloMat);
-      halo.position.y = 0.016;
-      halo.renderOrder = 25;
-      g.add(halo);
-
-      /* ② 深色棒体（2D 的 11px #0c1430）。
-         用"深色大圆柱 + 顶部两条亮棱线"，不用同心套管 ——
-         套管的外层半径一大，就会从侧面把内层深色棒整个遮住（实测深色完全看不见）。 */
-      const bodyMat = new THREE.MeshBasicMaterial({ color: 0x0c1430 });
-      const bodyMesh = tube(0.070, bodyMat, 0.056, 30);
-
-      /* ③ 荧光棱线：棒顶两侧各一条，读作 2D 的 17px 亮蓝描边。
-         每条分两层：不透明亮线（描边本体）+ 更宽的加色外溢（shadowBlur 的辉光）。
-         这样荧光是"从描边向外扩散"的，而不是把整根棒冲白。 */
-      const edgeMat = new THREE.MeshBasicMaterial({ color: 0x84bcff });
-      edgeGlowMat = new THREE.MeshBasicMaterial({
-        color: 0x5aa4ff, transparent: true, opacity: 0.42,
-        blending: THREE.AdditiveBlending, depthWrite: false
-      });
-      [-1, 1].forEach(function (sd) {
-        // 辉光层（宽、淡、加色）
-        const gg = new THREE.BoxGeometry(lenW * 0.995, 0.042, 0.070);
-        gg.translate(lenW / 2, 0, 0);
-        const gm = new THREE.Mesh(gg, edgeGlowMat);
-        gm.position.set(0, 0.090, sd * 0.055);
-        gm.renderOrder = 30;
-        g.add(gm);
-
-        // 描边本体（窄、实）
-        const eg = new THREE.BoxGeometry(lenW * 0.995, 0.014, 0.019);
-        eg.translate(lenW / 2, 0, 0);
-        const e = new THREE.Mesh(eg, edgeMat);
-        e.position.set(0, 0.093, sd * 0.055);
-        e.renderOrder = 31;
-        g.add(e);
-      });
-
-      // ④ 亮内芯（2D 的 3.5px #d8edff），压在棒顶正中
-      const coreMat = new THREE.MeshBasicMaterial({ color: 0xd8edff });
-      tube(0.011, coreMat, 0.093, 32);
-
-      // 转轴：深色柱 + 霓虹环（2D 的 8px 圆 + 2px 描边）
-      const piv = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.072, 0.072, 0.098, 22),
-        new THREE.MeshBasicMaterial({ color: 0x16204a })
-      );
-      piv.position.y = 0.056;
-      piv.renderOrder = 30;
-      g.add(piv);
-
-      const ringGeo = new THREE.TorusGeometry(0.072, 0.0085, 8, 26);
-      ringGeo.rotateX(Math.PI / 2);
-      const ringMat = new THREE.MeshBasicMaterial({ color: 0x5a9cff, transparent: true, opacity: 0.95 });
-      const ring = new THREE.Mesh(ringGeo, ringMat);
-      ring.position.y = 0.100;
-      ring.renderOrder = 32;
-      g.add(ring);
-
-      scene.add(g);
-      flipperMeshes.push({
-        g: g, f: f, halo: haloMat, edge: edgeMat, haloMesh: halo,
-        body: bodyMat, core: coreMat, ring: ringMat
-      });
-    });
-
-    /* ---------- ④ 坡道：实体槽（槽底 + 侧壁 + 银轨 + 黄带）----------
-       2D 坡道 = 半透明槽底 + 两侧立壁 + 三层描边钢轨 + 立柱/横档 + 黄色标识带。
-       这里照同一套结构做实体：斜视时能看到真实的槽内壁与轨道高度，而不是一张贴纸。
-       中心线与高度曲线直接复用物理（PS.rampPoint / PS.rampH），保证球贴在槽里。 */
-    (function () {
-      const ramp = PS.RAMP;
-      if (!ramp || !PS.rampPoint) return;
-
-      const N = 64;
-
-      // 采样中心线（含法向、半宽、抬升）
-      const F = [];
-      for (let i = 0; i <= N; i++) {
-        const t = i / N;
-        const p = PS.rampPoint(t);
-        const p2 = PS.rampPoint(Math.min(1, t + 0.006));
-        let dx = p2.x - p.x, dy = p2.y - p.y;
-        const dl = Math.hypot(dx, dy) || 1;
-        dx /= dl; dy /= dl;
-        F.push({
-          t: t,
-          x: p.x, y: p.y,
-          nx: -dy, ny: dx,
-          hw: PS.rampHalfW(t),
-          h: PS.rampH(t)
-        });
-      }
-
-      const vertToWorld = function (f, side, extraW, extraH) {
-        /* 末段裙边：2D 的 apron 从 t=0.70 起把半宽加 6px（drawLift 里 w = rampHalfW(t)+6），
-           目的就是让坡道"铺开"盖住二层入口，读作一个整体。
-           这里同样处理，并且多给一点（+14），因为 3D 斜视下需要更宽才盖得住接缝。 */
-        // 2D 的 apron 就是 rampHalfW(t) + 6；给多了末端会比二层颈部还宽，反而露出截断面
-        const apron = f.t > 0.70 ? (f.t - 0.70) / 0.30 : 0;
-        const extra = (extraW || 0) + apron * apron * 6;
-        const w = (f.hw + extra) * side;
-        return new THREE.Vector3(
-          wx(f.x + f.nx * w),
-          hzR(f.h + (extraH || 0)),
-          wz(f.y + f.ny * w)
-        );
-      };
-
-      /* —— 槽底（含"钻进二层"的延伸段）——
-         坡道中心线终点正好落在二层入口边界上，只画到那里视觉上就是"贴在边上"；
-         2D 用 apron 裙边把这一段盖住。3D 这里让槽底继续沿二层颈部向前延伸 52px，
-         延伸段藏在二层平台之下（二层 renderOrder 50 > 槽底 34），
-         只露出接缝附近的一小截 —— 于是坡道与二层读作一个整体，而不是两件东西。 */
-      (function () {
-        const DECKH = (PS.DECK3D ? PS.DECK3D.z : 52);
-        const EXT_N = 10, EXT_LEN = 52;
-        const lastP = F[N];
-        const FEX = F.slice();
-        for (let k = 1; k <= EXT_N; k++) {
-          const u = k / EXT_N;
-          FEX.push({
-            t: 1 + u * 0.001,                       // 保持 ~1，裙边加宽公式自然生效
-            x: lastP.x,
-            y: lastP.y + EXT_LEN * u,
-            nx: 0, ny: 1,
-            hw: 16 - 2 * u,                          // 16 → 14：贴住二层颈部，不外溢
-            h: DECKH
-          });
-        }
-        const verts = [], idx = [], uvs = [];
-        for (let i = 0; i < FEX.length; i++) {
-          const f = FEX[i];
-          const L = vertToWorld(f, -1, 0, 0);
-          const R = vertToWorld(f, 1, 0, 0);
-          verts.push(L.x, L.y, L.z, R.x, R.y, R.z);
-          uvs.push(0, f.t, 1, f.t);
-          if (i < FEX.length - 1) {
-            const a = i * 2;
-            idx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3);
-          }
-        }
-        const g = new THREE.BufferGeometry();
-        g.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
-        g.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
-        g.setIndex(idx);
-        g.computeVertexNormals();
-        const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
-          color: 0x101c38, transparent: true, opacity: 0.58,
-          side: THREE.DoubleSide, depthWrite: false
-        }));
-        m.renderOrder = 34;
-        scene.add(m);
-      })();
-
-      /* —— 两侧槽壁：从槽底向上立起（这是"槽"的核心）—— */
-      [-1, 1].forEach(function (side) {
-        const verts = [], idx = [];
-        const WALL_H = 0.078;
-        /* 末段槽壁渐隐（2D 的 apron fusion）：
-           坡道越靠近二层，槽壁越矮，到交付口正好归零 ——
-           这样槽体与二层顶面自然融成一体，不会出现一道"截断"的边界。 */
-        const wallAt = function (t) {
-          if (t < 0.70) return WALL_H;
-          const k = Math.min(1, (t - 0.70) / 0.30);
-          return WALL_H * (1 - k * k);
-        };
-        for (let i = 0; i <= N; i++) {
-          const f = F[i];
-          const b = vertToWorld(f, side, 0, 0);
-          const tp = b.clone(); tp.y += wallAt(f.t);
-          verts.push(b.x, b.y, b.z, tp.x, tp.y, tp.z);
-          if (i < N) {
-            const a = i * 2;
-            // 内侧面朝向槽内，双侧可见更稳
-            idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
-          }
-        }
-        const g = new THREE.BufferGeometry();
-        g.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
-        g.setIndex(idx);
-        g.computeVertexNormals();
-        const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
-          color: 0x2a4384, transparent: true, opacity: 0.80,
-          side: THREE.DoubleSide, depthWrite: false
-        }));
-        m.renderOrder = 35;
-        scene.add(m);
-      });
-
-      /* —— 银轨：沿两侧槽壁顶端的细亮线（2D 的 3 层描边导轨）—— */
-      [-1, 1].forEach(function (side) {
-        const pts = [];
-        for (let i = 0; i <= N; i += 2) {
-          const f2 = F[i];
-          const p = vertToWorld(f2, side, 0, 0);
-          // 末段银轨同样收进槽底，与二层顶面平齐
-          const k2 = f2.t < 0.70 ? 0 : Math.min(1, (f2.t - 0.70) / 0.30);
-          pts.push(new THREE.Vector3(p.x, p.y + 0.080 * (1 - k2 * k2), p.z));
-        }
-        scene.add(new THREE.Line(
-          new THREE.BufferGeometry().setFromPoints(pts),
-          new THREE.LineBasicMaterial({ color: 0xc8dcff, transparent: true, opacity: 0.9 })
-        ));
-      });
-
-      /* —— 黄色标识带：2D 在 t=0.22/0.30/0.40/0.50/0.60 处的 5 条横带 ——
-         直接用"槽底局部切片"生成，天然横跨槽面并贴合曲率。
-         （用旋转 Box 会因朝向轴算错而退化成沿槽细线 —— 踩过。） */
-      const bandMat = new THREE.MeshBasicMaterial({
-        color: 0xffce54, transparent: true, opacity: 0.82, side: THREE.DoubleSide
-      });
-      [0.22, 0.30, 0.40, 0.50, 0.60].forEach(function (tt) {
-        const half = 0.018;                 // 沿槽方向半宽：合计约 3.6 逻辑 px
-        const t0 = Math.max(0, tt - half), t1 = Math.min(1, tt + half);
-        const verts = [], idx = [];
-        let vi = 0;
-        for (let k = 0; k <= 2; k++) {
-          const t = t0 + (t1 - t0) * k / 2;
-          const i2 = Math.round(t * N);
-          const f = F[i2];
-          if (!f) continue;
-          const L = vertToWorld(f, -1, -3.0, 1.2);
-          const R = vertToWorld(f, 1, -3.0, 1.2);
-          verts.push(L.x, L.y, L.z, R.x, R.y, R.z);
-          if (k < 2) { idx.push(vi, vi + 2, vi + 1, vi + 1, vi + 2, vi + 3); }
-          vi += 2;
-        }
-        if (!idx.length) return;
-        const bg = new THREE.BufferGeometry();
-        bg.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
-        bg.setIndex(idx);
-        bg.computeVertexNormals();
-        const band = new THREE.Mesh(bg, bandMat);
-        band.renderOrder = 36;
-        scene.add(band);
-      });
-
-      /* —— 架空感：整条坡道在台面上的投影 —— */
-      try {
-        const cvR2 = PS.bake('ramp', BAKESCALE);
-        if (cvR2) {
-          const rsh = makeShadowLayer(cvR2, BAKESCALE * 4, 0.5);
-          const rshLayer = addLayer(rsh, 0, 33);
-          rshLayer.position.set(0.04, 0.002, 0.06);
-        }
-      } catch (e) {}
-    })();
-
-    /* ---------- ⑤ 二层：阴影层 + 平台层 ---------- */
-    try { addLayer(PS.bake('deckUnder', BAKESCALE), 0, 15); } catch (e) {}
-    // 二层是真正有高度的平台（物理里球会走上去），保持抬升
-    try {
-      const deckCanvas = PS.bake('deck', BAKESCALE);
-      const deckH = hzS(PS.DECK3D ? PS.DECK3D.z : 52);
-      // 投影：偏移一点、贴在台面上，二层立刻读作"悬空平台"
-      const shCv = makeShadowLayer(deckCanvas, BAKESCALE * 5, 0.66);
-      const shLayer = addLayer(shCv, 0, 48);
-      shLayer.position.set(0.055, 0.004, 0.075);
-      const deckLayer = addLayer(deckCanvas, 0, 50);
-      deckLayer.position.y = deckH;
-      // 记录引用：每帧按 PS.DECK3D.fade 调整不透明度，
-      // 球钻到二层下方时平台淡出（与 2D 版同一套逻辑，fade 1→0.42）
-      deckLayerRef = deckLayer;
-      deckShadowRef = shLayer;
-    } catch (e) {}
-
-
-    /* ---------- ⑥ 蓄力条 ---------- */
-    try { addLayer(PS.bake('plunger', BAKESCALE), 0, 25); } catch (e) {}
-
     /* ---------- ⑦ 球：真 3D 金属球 ---------- */
     const ballGeo = new THREE.SphereGeometry(9 * S, 36, 26);
     // 关键：透明贴图层都在透明渲染队列，不透明球会先画、然后被贴图盖住。
@@ -699,19 +327,6 @@ let TILT_DEG = 24;
       sp.renderOrder = 60;
       scene.add(sp);
       ballShadows.push(sp);
-    });
-
-    /* ---------- ⑧ 缓冲器光晕 ---------- */
-    (PS.BUMPERS || []).forEach(function (b) {
-      const sp = new THREE.Sprite(new THREE.SpriteMaterial({
-        map: glowTex, color: new THREE.Color(b.c), transparent: true,
-        opacity: 0.40, blending: THREE.AdditiveBlending, depthWrite: false
-      }));
-      sp.position.set(wx(b.x), hz(24), wz(b.y));
-      sp.scale.set(b.r * S * 6.4, b.r * S * 6.4, 1);
-      sp.renderOrder = 55;
-      scene.add(sp);
-      bumperPops.push({ sprite: sp, src: b });
     });
 
     // 必须显式设置渲染缓冲区尺寸：不设的话 WebGL 停在默认 300x150，
@@ -770,39 +385,8 @@ let TILT_DEG = 24;
       shm.scale.set(k, k, 1);
     }
 
-    /* 二层遮挡淡出：球从二层下方掠过时，平台变半透明让球可见。
-       直接读 2D 版算好的 PS.DECK3D.fade（update 里已做 1→0.42 的平滑过渡），
-       两边共用同一份状态，行为与 2D 完全一致。 */
-    if (deckLayerRef) {
-      const fd = (PS.DECK3D && PS.DECK3D.fade !== undefined) ? PS.DECK3D.fade : 1;
-      deckLayerRef.material.opacity = fd;
-      if (deckShadowRef) deckShadowRef.material.opacity = 0.62 * fd;
-    }
 
-    // 挡板：绕转轴真实旋转；按下时蓝→品红（对应 2D 的 #84bcff → #ff9ee8）
-    for (let i = 0; i < flipperMeshes.length; i++) {
-      const fm = flipperMeshes[i];
-      fm.g.rotation.y = -fm.f.angle;
-      const pressed = !!fm.f.pressed;
-      fm.halo.color.setHex(pressed ? 0xff5ecb : 0x4f9dff);
-      fm.halo.opacity = pressed ? 0.60 : 0.46;
-      fm.edge.color.setHex(pressed ? 0xff9ee8 : 0x84bcff);
-      if (edgeGlowMat) {
-        edgeGlowMat.color.setHex(pressed ? 0xff5ecb : 0x5aa4ff);
-        edgeGlowMat.opacity = pressed ? 0.62 : 0.42;
-      }
-      fm.core.color.setHex(pressed ? 0xffe6f9 : 0xd8edff);
-      fm.ring.color.setHex(pressed ? 0xff5ecb : 0x5a9cff);
-      fm.body.color.setHex(pressed ? 0x3a1030 : 0x0c1430);
-    }
 
-    for (let i = 0; i < bumperPops.length; i++) {
-      const bp = bumperPops[i];
-      const pop = Math.max(0, (bp.src && bp.src.pop) || 0);
-      bp.sprite.material.opacity = 0.32 + Math.min(0.46, pop * 0.8);
-      const sc2 = 1 + Math.min(0.34, pop * 0.5);
-      bp.sprite.scale.set(bp.src.r * S * 6.4 * sc2, bp.src.r * S * 6.4 * sc2, 1);
-    }
 
     renderer.render(scene, camera);
     drawFx();
