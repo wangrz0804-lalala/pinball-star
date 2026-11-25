@@ -3336,7 +3336,9 @@ function drawBackglass(){
   // 机柜头标：注册名常显（审核截图要求截图内出现小游戏名；背玻璃头标也是弹珠台正宗设计）
   tinyText('弹珠的奔走 · PINBALL STAR', 240, 50, 8, 'rgba(150,190,240,.5)', 'center', '1px');
   // 版本水印（仅小游戏端）：真机上肉眼即可确认跑的是哪一版，避免"改了但没生效"的排查空转
-  if (window.__PS_VIEW) tinyText('BUILD ' + (window.__PS_BUILD || '?'), 240, 62, 7, 'rgba(120,160,215,.45)', 'center', '1px');
+  if (window.__PS_VIEW) tinyText(
+    'BUILD ' + (window.__PS_BUILD || '?') + (window.__PS_BACK ? ' · DB1' : (window.__PS_DBFAIL ? ' · DB!' : ' · DB0')),
+    240, 62, 7, 'rgba(120,160,215,.45)', 'center', '1px');
 
   // balls left (right, stacked as pips with a BALL caption)
   ctx.save();
@@ -4569,6 +4571,10 @@ function makeOffCanvas(pxW, pxH){
     } catch(e){ c = null; }
   }
   if (!c || !c.getContext) return null;
+  // 关键防线：缓存画布绝不能是上屏画布。某些基础库/工具链会让这些接口返回同一个上屏对象，
+  // 那样 renderLayerToCache 就会把缓存内容直接画到屏幕上（每帧额外糊一层色），
+  // 随后再被 blit 一次 —— 正是"闪一下颜色 + 整屏蒙版"的典型形态。
+  if (c === cv || (window.__PS_BACK && c === window.__PS_BACK)) return null;
   return c;
 }
 function renderLayerToCache(w, h, drawFn){
@@ -6611,12 +6617,34 @@ function render(){
   drawOverlays();
 
   if (state.flash > 0){
-    // 慢帧时 update 的 dt 被钳制，闪烁会以整屏蒙版的形式滞留几秒；这里补一道真实时间衰减
-    state.flash = Math.max(0, state.flash - (window.__PS_RDT || 0.016) * 2.2);
-    ctx.save();
-    ctx.fillStyle = 'rgba(255,225,150,' + (Math.min(1, state.flash) * 0.22) + ')';
-    ctx.fillRect(0, 0, CW, CH);
-    ctx.restore();
+    // 闪烁**不再整屏叠色**：整屏半透明色一旦在慢帧下滞留，就会表现成"全屏被加了一层蒙版"。
+    // 改成四边光晕脉冲（画面中央永远清晰），颜色只出现在边框内侧一圈。
+    const rdt = window.__PS_RDT || 0.016;
+    // 慢帧直接掐掉：一帧就过去的闪烁没有意义，只会变成一张静态色罩
+    state.flash = rdt > 0.12 ? 0 : Math.max(0, state.flash - rdt * 3.2);
+    if (state.flash > 0){
+      const a = Math.min(1, state.flash) * 0.30;
+      const bw = 26 + 34 * Math.min(1, state.flash);
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const eg = ctx.createLinearGradient(0, 0, bw, 0);
+      eg.addColorStop(0, 'rgba(255,215,120,' + a.toFixed(3) + ')');
+      eg.addColorStop(1, 'rgba(255,215,120,0)');
+      // 左/右
+      ctx.fillStyle = eg;                        ctx.fillRect(0, 0, bw, CH);
+      ctx.save(); ctx.translate(CW, 0); ctx.scale(-1, 1);
+      ctx.fillStyle = eg;                        ctx.fillRect(0, 0, bw, CH);
+      ctx.restore();
+      const vg2 = ctx.createLinearGradient(0, 0, 0, bw);
+      vg2.addColorStop(0, 'rgba(255,215,120,' + a.toFixed(3) + ')');
+      vg2.addColorStop(1, 'rgba(255,215,120,0)');
+      // 上/下
+      ctx.fillStyle = vg2;                       ctx.fillRect(0, 0, CW, bw);
+      ctx.save(); ctx.translate(0, CH); ctx.scale(1, -1);
+      ctx.fillStyle = vg2;                       ctx.fillRect(0, 0, CW, bw);
+      ctx.restore();
+      ctx.restore();
+    }
   }
 
   if (!window.__PS_VIEW){
@@ -6663,11 +6691,6 @@ function render(){
   if (state.screen === 'play' && !state.paused) drawPauseBtn();
   if (state.paused) drawPause();
 
-  // 双缓冲提交（小游戏端）：整帧画完才一次性贴到屏幕画布。
-  // 微信小游戏主画布是实时绘制的，没有双缓冲——一帧内任何中间态都会被屏幕上看到，
-  // 帧一慢就表现为"整屏闪一下绿/黄/蓝"（背景星云、闪光、区域光轮流露脸）。网页端无此函数，跳过。
-  if (typeof presentBack === 'function') presentBack();
-
   // 3D bezel: the room light comes from above, so the cabinet sides catch gradient shade
   ctx.save();
   let bz = ctx.createLinearGradient(0, 0, 16, 0);
@@ -6686,6 +6709,12 @@ function render(){
   ctx.fillStyle = bz;
   ctx.fillRect(0, 0, CW, 14);
   ctx.restore();
+
+  // 帧末提交（小游戏端）：整帧全部画完后，一次性把离屏缓冲贴到屏幕上屏画布。
+  // 微信小游戏主画布实时呈现、没有帧缓冲，一帧内的中间态（星云蓝紫/台面绿光/闪光黄）都会露脸，
+  // 帧一慢就表现为"整屏闪一下颜色，而且像被蒙了一层色"。唯一可靠的解法就是这一处双缓冲。
+  // 网页端没有 presentBack，天然跳过（浏览器本身就是整帧提交）。
+  if (typeof presentBack === 'function') presentBack();
 }
 
 /* ---------------------------- pause ---------------------------- */
