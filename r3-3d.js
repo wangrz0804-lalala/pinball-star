@@ -34,7 +34,15 @@
   const hz = h => (h || 0) * S;
   // 2D 版的"抬升 52px"是视觉位移，不是真实物理高度；压缩后既保纵深又不挡后方台面。
   // 球/二层/坡道共用同一系数，保证球始终贴在平台表面上。
-  const HSCALE = 1.0;
+  /* 高度换算（这次算对了）：
+     正交相机 + 24° 斜视下，世界高度 h_w 在屏幕上产生的**上移量** = h_w * sin24° * K
+     （K = 每世界单位的屏幕像素数 = 100，因为台面 8 单位对应 800px）。
+     要让"逻辑抬升 h 像素"在屏幕上正好也抬 h 像素，必须
+         h_w = h * S / sin24°
+     即 HSCALE = 1/sin24° ≈ 2.459。
+     ——之前取 0.5 / 1.0 都是错的，二层和坡道因此比 2D 低 30~50px，怎么调都对不上。 */
+  const SIN_T = Math.sin(24 * Math.PI / 180);
+  const HSCALE = 1 / SIN_T;
   const hzS = h => (h || 0) * S * HSCALE;
   /* 坡道与二层**必须用同一个高度系数**：
      rampH(1) === DECK3D.z，坡道末端本来就该正好落在二层顶面。
@@ -67,6 +75,9 @@ let TILT_DEG = 24;
   let edgeGlowMat = null;
   // 挡板占用区域（逻辑坐标）：两支挡板 + 转轴 + 一点点余量
   const FLIP_RECT = { x: 50, y: 620, w: 380, h: 170 };
+  let deckPlaneRef = null, rampTex = null;
+  const rampSlices = [];
+  let rampBakeCv = null;
   let ready = false;
 
   /* 球面皮肤贴图（等距柱状 256x128）：
@@ -260,6 +271,75 @@ let TILT_DEG = 24;
     try { addLayer(PS.bake('base', BAKESCALE), 0, 10); }
     catch (e) { console.log('base layer failed: ' + e.message); }
 
+    /* ============================================================
+       实体几何层（第一版被认可的立体感）
+       —— 位置用修正后的 HSCALE 精确对齐 2D：抬 h 逻辑像素 = hzS(h) 世界高度
+       ============================================================ */
+
+    /* 裁原版烘焙图上的一块（用于 3D 物件顶面，美术照搬不重画） */
+    const cropBaked = function (src, lx, ly, rLogic, sc) {
+      if (!src) return null;
+      const px = lx * sc, py = ly * sc, pr = rLogic * sc;
+      const size = Math.max(8, Math.round(pr * 2));
+      const c = document.createElement('canvas');
+      c.width = c.height = size;
+      const g = c.getContext('2d');
+      try { g.drawImage(src, px - pr, py - pr, pr * 2, pr * 2, 0, 0, size, size); }
+      catch (e) { return null; }
+      const t = new THREE.CanvasTexture(c);
+      t.anisotropy = 8;
+      return t;
+    };
+
+    let bumpCv = null;
+    try { bumpCv = PS.bake('bumpers', BAKESCALE); } catch (e) { bumpCv = null; }
+    try { rampBakeCv = PS.bake('ramp', BAKESCALE); } catch (e) { rampBakeCv = null; }
+
+    /* ---------- 缓冲器：真圆柱 + 原版图案顶面 ---------- */
+    (PS.BUMPERS || []).forEach(function (b) {
+      const rW = (b.r + 1) * S;
+      const BODY_H = 0.085;
+      const col = new THREE.Color(b.c);
+      const body = new THREE.Mesh(
+        new THREE.CylinderGeometry(rW, rW * 1.05, BODY_H, 40, 1, true),
+        new THREE.MeshBasicMaterial({
+          color: 0x0d1730, transparent: true, opacity: 0.97, side: THREE.DoubleSide
+        })
+      );
+      body.position.set(wx(b.x), BODY_H / 2, wz(b.y));
+      body.renderOrder = 38;
+      scene.add(body);
+      // 侧面一圈本色发光（读作霓虹环）
+      const ring = new THREE.Mesh(
+        new THREE.TorusGeometry(rW * 1.02, 0.016, 8, 44),
+        new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.9 })
+      );
+      ring.rotation.x = Math.PI / 2;
+      ring.position.set(wx(b.x), BODY_H, wz(b.y));
+      ring.renderOrder = 40;
+      scene.add(ring);
+      // 顶面：原版图案 1:1 铺上（不缩放）
+      const capTex = cropBaked(bumpCv, b.x, b.y, b.r + 1, BAKESCALE);
+      if (capTex) {
+        const cap = new THREE.Mesh(
+          new THREE.CircleGeometry(rW, 44),
+          new THREE.MeshBasicMaterial({ map: capTex, transparent: true, depthWrite: false })
+        );
+        cap.rotation.x = -Math.PI / 2;
+        cap.position.set(wx(b.x), BODY_H + 0.001, wz(b.y));
+        cap.renderOrder = 41;
+        scene.add(cap);
+      }
+    });
+
+    /* 二层也交回 2D：3D 抬升平面会遮挡后画内容、且侧壁阴影会在左侧糊出一块暗区。
+       2D 的 drawDeckTopRaw 本来就用"平移 + 半透明"表达了同样的抬升，且不遮挡下层。 */
+
+    /* 坡道交回 2D 原版绘制（drawLift）。
+       3D 分片方案不可行：每片都是"整宽平面 + 不同高度"，斜视时高处片会遮挡低处片，
+       在左上角糊出一大片斜切暗块。而 2D 的 drawLift 已经画了银轨/黄带/立柱/焊缝，
+       精度高于任何 3D 重建。 */
+
     /* ---------- ⑦ 球：真 3D 金属球 ---------- */
     const ballGeo = new THREE.SphereGeometry(9 * S, 36, 26);
     // 关键：透明贴图层都在透明渲染队列，不透明球会先画、然后被贴图盖住。
@@ -291,12 +371,17 @@ let TILT_DEG = 24;
 
     /* 拖尾：用 3D 加色光片实现，renderOrder 排在球之前（69 < 70）——
        如果把拖尾画在 2D 覆盖层上，它会盖在 3D 球上头，看起来像"两个球"（一个白雾、一个球体）。 */
+    /* 彗尾：一串加色光片，由球尾向球头逐渐变大变亮。
+       颜色取当前拖尾皮肤（默认 #7fc4ff，与原版一致）。 */
+    const trailCol = new THREE.Color(
+      (PS.TRAILS && PS.TRAILS[PS.state.profile.trail] || { c: '#7fc4ff' }).c || '#7fc4ff'
+    );
     for (let i = 0; i < TRAIL_N; i++) {
       const q = new THREE.Mesh(
         new THREE.PlaneGeometry(1, 1),
         new THREE.MeshBasicMaterial({
-          map: glowTex, transparent: true, opacity: 0,
-          blending: THREE.AdditiveBlending, depthWrite: false, color: 0xbfe6ff
+          map: glowTex, color: trailCol, transparent: true, opacity: 0,
+          blending: THREE.AdditiveBlending, depthWrite: false
         })
       );
       q.rotation.x = -Math.PI / 2;
@@ -363,8 +448,7 @@ let TILT_DEG = 24;
       const m = meshes[i], b = visible[i];
       if (!b) { m.visible = false; ballShadows[i].visible = false; continue; }
       const h = heightOf(b);
-      m.visible = true;
-      m.position.set(wx(b.x), worldH(h, b.rampT !== undefined) + 9 * S, wz(b.y));
+      m.visible = false;   // 球由 2D drawBalls 绘制（口径最小、且不会被 2D 动态层遮挡）
     }
 
     for (let i = 0; i < 2; i++) {
@@ -402,8 +486,18 @@ let TILT_DEG = 24;
       }
     }
 
-    /* 更新 3D 拖尾：按 b.trail 的点位铺光片，越靠后越小越淡 */
+    // 二层淡出：球钻到二层下方时与 2D 同步变透明
+    if (deckPlaneRef) {
+      const fd = (PS.DECK3D && PS.DECK3D.fade !== undefined) ? PS.DECK3D.fade : 1;
+      deckPlaneRef.material.opacity = 0.82 * fd;
+    }
+
+    /* 3D 拖尾已停用：drawBalls（2D）自带原版彗尾，再叠一层会变成双拖尾。
+       保留代码结构以便将来切回。 */
     (function () {
+      for (let i = 0; i < TRAIL_N; i++) trailMeshes[i].visible = false;
+      return;
+      /* eslint-disable no-unreachable */
       let k = 0;
       for (let bi = 0; bi < visible.length && k < TRAIL_N; bi++) {
         const bb = visible[bi];
@@ -415,9 +509,10 @@ let TILT_DEG = 24;
           const f = i / Math.max(1, tr.length);
           q.visible = true;
           q.position.set(wx(t.x), worldH(lift, bb.rampT !== undefined) + 0.012, wz(t.y));
-          const sz = 0.055 + 0.075 * f;
+          // 尺寸/亮度从尾到头单调增大；给够亮度才看得见（原来 0.30 太淡）
+          const sz = (0.05 + 0.16 * f) * 1.5;
           q.scale.set(sz, sz, 1);
-          q.material.opacity = 0.30 * f;
+          q.material.opacity = 0.16 + 0.62 * f * f;
         }
       }
       for (; k < TRAIL_N; k++) trailMeshes[k].visible = false;
@@ -596,7 +691,13 @@ let TILT_DEG = 24;
     PS.state.mode = 'play';
     PS.state.screen = 'play';
     const b0 = PS.balls && PS.balls[0];
-    if (b0) { b0.x = 330; b0.y = 620; b0.vx = 0; b0.vy = 0; b0.hidden = false; b0.deck = 'lower'; b0.rampT = undefined; }
+    if (b0) {
+      b0.x = 330; b0.y = 620; b0.vx = 0; b0.vy = 0; b0.hidden = false;
+      b0.deck = 'lower'; b0.rampT = undefined;
+      // 造一段拖尾数据（向右上移动的轨迹），用于验证彗尾渲染
+      b0.trail = [];
+      for (let i = 0; i < 22; i++) b0.trail.push({ x: 330 - i * 7, y: 620 + i * 6 });
+    }
 
   }
 

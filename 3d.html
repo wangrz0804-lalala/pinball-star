@@ -15,6 +15,8 @@
   body{display:flex;align-items:center;justify-content:center;}
   #wrap{position:relative;filter:drop-shadow(0 12px 60px rgba(70,130,255,.28));}
   canvas{display:block;border-radius:14px;touch-action:none;}
+  /* 分层：WebGL（台面底图 + 3D 缓冲器）在下，2D 画布（全部动态元素 + 球）在上。
+     反过来会让 WebGL 那张不透明台面底图盖住 2D 的坡道/二层/灯。 */
   #gl{position:absolute;left:0;top:0;z-index:0;pointer-events:none;}
   #c{position:relative;z-index:1;}
 </style>
@@ -6987,6 +6989,7 @@ requestAnimationFrame(loop);
 window.__PS = {
   // 3D 版额外导出（仅本文件）：3D 渲染层需要坡道/二层高度、粒子与飘字
   RAMP: RAMP, DECK3D: DECK3D, pops: pops, parts: parts, CAM: CAM,
+  TRAILS: TRAILS, SKINS: SKINS,
   // 坡道几何：3D 层要按同一条中心线与高度曲线构建实体槽，必须用同一套函数
   rampPoint: rampPoint, rampH: rampH, rampHalfW: rampHalfW,
   /* 把某一层画进指定的 2D 上下文。
@@ -7041,6 +7044,22 @@ window.__PS = {
         drawWalls();
         drawFuelLights();
         drawDeployGauge();
+      } else if (which === 'ramp' || which === 'deck') {
+        /* 关键：drawDeckTop / drawLift 内部会按 DECK3D.z 把内容"抬起来"画。
+           烘焙时必须把这个抬升临时归零，否则"烘一次 + 3D 抬一次" = 抬两倍。 */
+        const zSave = DECK3D.z;
+        DECK3D.z = 0;
+        try {
+          // 必须调 **Raw** 版本：drawDeckTop() 会走 deckTopCache，
+          // 而那份缓存是 z=52 时烘的，改 DECK3D.z 对它无效（会多抬一次）。
+          if (which === 'deck') { drawDeckTopRaw(); drawDeckModules(); }
+          else { drawLift(); }
+        } finally { DECK3D.z = zSave; }
+      } else if (which === 'bumpers') {
+        // 单独烘缓冲器：3D 圆柱顶面要裁这块图案（美术照搬，不重画）
+        drawBumpers();
+      } else if (which === 'flip') {
+        drawFlippers();
       }
     } catch (e) {
       try { console.log('bake(' + which + ') partial: ' + e.message); } catch (e2) {}
@@ -7060,16 +7079,18 @@ window.__PS = {
     drawPosts();
     drawOutGates();
     drawFlippers();
-    drawBumpers();
+    // 缓冲器 / 二层 / 坡道 已由 3D 实体提供（见 r3-3d.js），这里不重复绘制
     drawDock();
     drawBlackHole();
     drawRankRing();
     drawWorms();
     drawFlags();
     drawWarpLink();
+    drawBalls('lower');
     drawDeckUnder();
     drawDeckTop();
     drawDeckModules();
+    // 坡道：原版精细绘制（银轨 / 黄带 / 立柱 / 与二层 apron 融合）
     drawLift();
     drawGate();
     drawLaneLamps();
