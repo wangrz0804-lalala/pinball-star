@@ -6956,8 +6956,20 @@ requestAnimationFrame(loop);
 window.__PS = {
   // 3D 版额外导出（仅本文件）：3D 渲染层需要坡道/二层高度、粒子与飘字
   RAMP: RAMP, DECK3D: DECK3D, pops: pops, parts: parts, CAM: CAM,
-  // 3D 层需要按层重绘挡板（会转动），必须导出
-  drawFlippers: drawFlippers,
+  /* 把某一层画进指定的 2D 上下文。
+     注意：绘制函数内部用的是闭包变量 ctx，传参会无效（曾导致挡板被画到上层 2D 画布、
+     位置与透视台面错开）。这里临时替换 ctx 后再恢复，是唯一可靠的做法。 */
+  drawInto: function (g, which) {
+    const saved = ctx;
+    ctx = g;
+    try {
+      if (which === 'flip') drawFlippers();
+    } catch (e) {
+      try { console.log('drawInto(' + which + ') failed: ' + e.message); } catch (e2) {}
+    } finally {
+      ctx = saved;
+    }
+  },
   ZONES: ZONES, SPOTS: SPOTS, RING: RING, WORMS: WORMS, FLAGS: FLAGS,
   /* 把原版台面的**静态装饰**烘成一张贴图 —— 3D 台面直接用它，
      这样台面的视觉 100% 是原版那套（分区/刻线/铭牌/装饰全在），

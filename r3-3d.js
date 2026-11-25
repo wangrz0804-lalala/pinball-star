@@ -26,10 +26,14 @@
   const wx = x => (x - CX) * S;
   const wz = y => (y - CY) * S;
   const hz = h => (h || 0) * S;
+  // 2D 版的"抬升 52px"是视觉位移，不是真实物理高度；压缩后既保纵深又不挡后方台面。
+  // 球/二层/坡道共用同一系数，保证球始终贴在平台表面上。
+  const HSCALE = 0.62;
+  const hzS = h => (h || 0) * S * HSCALE;
 
   // 相机倾角：原版矩阵约 24°，但我们的美术是为"正俯视"画的，
   // 角度一大就会明显失真、和 2D 版拉开差距。取 14° 兼顾纵深感与原版观感。
-  let TILT_DEG = 14;
+  let TILT_DEG = 20;
   (function () {
     const m = /#.*tilt=(\d+(?:\.\d+)?)/.exec(location.hash);
     if (m) {
@@ -88,6 +92,34 @@
     return new THREE.CanvasTexture(c);
   }
 
+  /* 由某层烘焙图生成一张模糊投影贴图。
+     这是"看得出高度"的关键：抬高的元素在台面上有影子，眼睛立刻读出悬浮/抬升；
+     比加侧壁更省事，也不会挡住台面美术。 */
+  function makeShadowLayer(canvas, blurPx, alpha) {
+    const c = document.createElement('canvas');
+    c.width = canvas.width;
+    c.height = canvas.height;
+    const g = c.getContext('2d');
+    try {
+      g.filter = 'blur(' + blurPx + 'px)';
+      g.globalAlpha = alpha === undefined ? 0.62 : alpha;
+      // 先把原图压成纯黑：用 source-in 只保留 alpha 形状
+      g.drawImage(canvas, 0, 0);
+      g.globalCompositeOperation = 'source-in';
+      g.fillStyle = '#000';
+      g.fillRect(0, 0, c.width, c.height);
+    } catch (e) {
+      // 不支持 filter 的环境就退化成一圈淡暗影
+      g.globalCompositeOperation = 'source-over';
+      g.globalAlpha = (alpha === undefined ? 0.62 : alpha) * 0.5;
+      g.drawImage(canvas, 0, 0);
+      g.globalCompositeOperation = 'source-in';
+      g.fillStyle = '#000';
+      g.fillRect(0, 0, c.width, c.height);
+    }
+    return c;
+  }
+
   /* 把一层烘焙图做成一块面片（整张 480x800 → 世界 4.8x8） */
   function addLayer(canvas, z, order, opacity) {
     const tex = makeTexFromCanvas(canvas);
@@ -130,13 +162,119 @@
     shadowTex = makeShadowTexture();
     glowTex = makeGlowTexture();
 
+    /* ---------- ⓪ 台体侧壁：机台厚度 ----------
+       这是"看得出是 3D"的关键：斜视时台面边缘出现真实的侧壁厚度与受光，
+       而台面上所有美术仍在 z=0 原位，不会位移。 */
+    (function () {
+      const outline = [];
+      outline.push([24, 636], [24, 264]);
+      for (let i = 0; i <= 40; i++) {
+        const a = Math.PI + Math.PI * (i / 40);
+        outline.push([240 + Math.cos(a) * 216, 264 + Math.sin(a) * 216]);
+      }
+      outline.push([456, 800], [24, 800]);
+      const shp = new THREE.Shape();
+      shp.moveTo(wx(outline[0][0]), -wz(outline[0][1]));
+      for (let i = 1; i < outline.length; i++) shp.lineTo(wx(outline[i][0]), -wz(outline[i][1]));
+      shp.closePath();
+      const DEPTH = 0.26;
+      const g = new THREE.ExtrudeGeometry(shp, { depth: DEPTH, bevelEnabled: false });
+      g.rotateX(-Math.PI / 2);
+      // 整体下移到台面平面**以下**：顶盖若与台面同高会 z-fighting（表现为横条纹）
+      g.translate(0, -DEPTH - 0.012, 0);
+      const m = new THREE.Mesh(g, new THREE.MeshStandardMaterial({
+        color: 0x101a38,
+        emissive: 0x24448c,
+        emissiveIntensity: 0.55,
+        roughness: 0.42,
+        metalness: 0.85
+      }));
+      m.renderOrder = 5;
+      scene.add(m);
+
+      // 台面外缘一圈发光线（霓虹机台边）
+      const rimPts = outline.map(function (p) {
+        return new THREE.Vector3(wx(p[0]), 0.002, wz(p[1]));
+      });
+      rimPts.push(rimPts[0].clone());
+      scene.add(new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints(rimPts),
+        new THREE.LineBasicMaterial({ color: 0x7fd0ff, transparent: true, opacity: 0.55 })
+      ));
+    })();
+
     /* ---------- ① 台面底层（原版 2D 全部静态层）---------- */
-    try { addLayer(PS.bake('base', 2), 0, 10); }
+    // 烘焙分辨率：按物理像素 1:1（DPR×480）出图，避免透视重采样后发虚
+    const BAKESCALE = Math.max(2, Math.min(4, Math.ceil((window.devicePixelRatio || 1))));
+    try { addLayer(PS.bake('base', BAKESCALE), 0, 10); }
     catch (e) { console.log('base layer failed: ' + e.message); }
 
     /* ---------- ② 弹射器 / 缓冲器：各自一层 ---------- */
-    try { addLayer(PS.bake('slings', 1.5), 10, 20); } catch (e) {}
-    try { addLayer(PS.bake('bumpers', 1.5), 22, 40); } catch (e) {}
+    // 弹射器/缓冲器与物理坐标严格对应：必须 z=0，否则会像挡板一样被透视挪位
+    try { addLayer(PS.bake('slings', BAKESCALE), 0, 20); } catch (e) {}
+    /* 缓冲器：真圆柱体，顶面用原版绘制裁出来的图案。
+       —— 美术一点没重画，但有了真实的体积、侧面受光与投影。 */
+    (function () {
+      let bumpCv = null;
+      try { bumpCv = PS.bake('bumpers', BAKESCALE); } catch (e) { bumpCv = null; }
+      if (!bumpCv) return;
+      const BODY_H = 0.115;             // 缓冲器露出一截的高度（世界单位）
+      (PS.BUMPERS || []).forEach(function (b) {
+        const col = new THREE.Color(b.c);
+        const rW = (b.r + 2) * S;
+
+        // 侧面：深色金属 + 本色自发光，斜看时有明暗过渡
+        const body = new THREE.Mesh(
+          new THREE.CylinderGeometry(rW, rW * 1.06, BODY_H, 36, 1, true),
+          new THREE.MeshStandardMaterial({
+            color: 0x101a38,
+            emissive: col.clone().multiplyScalar(0.45),
+            emissiveIntensity: 0.9,
+            roughness: 0.3,
+            metalness: 0.92,
+            side: THREE.DoubleSide
+          })
+        );
+        body.position.set(wx(b.x), BODY_H / 2, wz(b.y));
+        body.renderOrder = 38;
+        scene.add(body);
+
+        // 顶盖：从烘焙图裁出该缓冲器所在的正方形，1:1 贴到圆面上（不做任何缩放/偏移）
+        const pad = b.r + 2;
+        const sq = Math.round(pad * 2 * BAKESCALE);
+        const capCv = document.createElement('canvas');
+        capCv.width = capCv.height = sq;
+        const cg = capCv.getContext('2d');
+        cg.drawImage(bumpCv,
+          Math.round((b.x - pad) * BAKESCALE), Math.round((b.y - pad) * BAKESCALE),
+          sq, sq, 0, 0, sq, sq);
+        const capTex = new THREE.CanvasTexture(capCv);
+        capTex.encoding = THREE.sRGBEncoding;
+        capTex.anisotropy = 8;
+        const cap = new THREE.Mesh(
+          new THREE.CircleGeometry(rW, 40),
+          new THREE.MeshBasicMaterial({
+            map: capTex, transparent: true, depthWrite: false
+          })
+        );
+        cap.rotation.x = -Math.PI / 2;
+        cap.position.set(wx(b.x), BODY_H, wz(b.y));
+        cap.renderOrder = 39;
+        scene.add(cap);
+
+        // 顶盖外沿一圈霓虹，补上"发光边"的读法
+        const halo = new THREE.Mesh(
+          new THREE.TorusGeometry(rW * 0.99, 0.016, 8, 40),
+          new THREE.MeshBasicMaterial({
+            color: col, transparent: true, opacity: 0.85, depthWrite: false
+          })
+        );
+        halo.rotation.x = Math.PI / 2;
+        halo.position.set(wx(b.x), BODY_H + 0.004, wz(b.y));
+        halo.renderOrder = 41;
+        scene.add(halo);
+      });
+    })();
 
     /* ---------- ③ 挡板：每帧重绘（会转动）----------
        只烘焙"挡板所在的小矩形"，每帧纹理上传 ~0.5MB 而不是整屏 3.4MB。 */
@@ -152,7 +290,8 @@
       });
       const m = new THREE.Mesh(geo, mat);
       m.rotation.x = -Math.PI / 2;
-      m.position.set(wx(FLIP_RECT.x + FLIP_RECT.w / 2), hz(7), wz(FLIP_RECT.y + FLIP_RECT.h / 2));
+      // 挡板会与球发生碰撞，位置必须与物理完全一致 → z=0
+      m.position.set(wx(FLIP_RECT.x + FLIP_RECT.w / 2), 0, wz(FLIP_RECT.y + FLIP_RECT.h / 2));
       m.renderOrder = 30;
       scene.add(m);
     })();
@@ -160,11 +299,17 @@
     /* ---------- ④ 坡道：按高度切片，做出真实的抬升 ---------- */
     (function () {
       let cvR = null;
-      try { cvR = PS.bake('ramp', 1.5); } catch (e) { cvR = null; }
+      try { cvR = PS.bake('ramp', BAKESCALE); } catch (e) { cvR = null; }
       if (!cvR) return;
       const N = 30;
       const H = (PS.DECK3D ? PS.DECK3D.z : 52);
       const tex = makeTexFromCanvas(cvR);
+      // 坡道整体投影：贴着台面铺一层，让"桥"读作架空的
+      try {
+        const rsh = makeShadowLayer(cvR, BAKESCALE * 4, 0.5);
+        const rshLayer = addLayer(rsh, 0, 33);
+        rshLayer.position.set(0.04, 0.002, 0.06);
+      } catch (e) {}
       const sh = 1 / N;
       for (let i = 0; i < N; i++) {
         const t0 = i / N, t1 = (i + 1) / N;
@@ -183,18 +328,28 @@
         m.rotation.x = -Math.PI / 2;
         const yc = 800 * tc;                       // 该带的逻辑 y（0=顶部）
         const hh = H * Math.pow(tc, 1.35);         // 越靠顶部抬得越高
-        m.position.set(0, hz(hh + 2), wz(yc));
+        m.position.set(0, hzS(hh + 2), wz(yc));
         m.renderOrder = 35;
         scene.add(m);
       }
     })();
 
     /* ---------- ⑤ 二层：阴影层 + 平台层 ---------- */
-    try { addLayer(PS.bake('deckUnder', 1.5), 1, 15); } catch (e) {}
-    try { addLayer(PS.bake('deck', 1.5), (PS.DECK3D ? PS.DECK3D.z : 52), 50); } catch (e) {}
+    try { addLayer(PS.bake('deckUnder', BAKESCALE), 0, 15); } catch (e) {}
+    // 二层是真正有高度的平台（物理里球会走上去），保持抬升
+    try {
+      const deckCanvas = PS.bake('deck', BAKESCALE);
+      const deckH = hzS(PS.DECK3D ? PS.DECK3D.z : 52);
+      // 投影：偏移一点、贴在台面上，二层立刻读作"悬空平台"
+      const shCv = makeShadowLayer(deckCanvas, BAKESCALE * 5, 0.66);
+      const shLayer = addLayer(shCv, 0, 48);
+      shLayer.position.set(0.055, 0.004, 0.075);
+      const deckLayer = addLayer(deckCanvas, 0, 50);
+      deckLayer.position.y = deckH;
+    } catch (e) {}
 
     /* ---------- ⑥ 蓄力条 ---------- */
-    try { addLayer(PS.bake('plunger', 1.5), 0, 25); } catch (e) {}
+    try { addLayer(PS.bake('plunger', BAKESCALE), 0, 25); } catch (e) {}
 
     /* ---------- ⑦ 球：真 3D 金属球 ---------- */
     const ballGeo = new THREE.SphereGeometry(9 * S, 36, 26);
@@ -250,6 +405,10 @@
       bumperPops.push({ sprite: sp, src: b });
     });
 
+    // 必须显式设置渲染缓冲区尺寸：不设的话 WebGL 停在默认 300x150，
+    // 被 CSS 拉伸到全屏 → 整张台面糊成一片（"像素都降低了"的直接原因）。
+    resize(canvas.clientWidth || 480, canvas.clientHeight || 940);
+
     ready = true;
     return true;
   }
@@ -269,15 +428,17 @@
     if (b.deck === 'upper') return (PS.DECK3D ? PS.DECK3D.z : 52) + 1;
     return 0;
   }
+  // 物理高度 → 世界高度（统一压缩，保证球贴在平台上）
+  const worldH = h => hzS(h);
 
   function redrawFlippers() {
-    if (!flipCtx || !PS.drawFlippers) return false;
+    if (!flipCtx || !PS.drawInto) return false;
     const g = flipCtx;
     g.setTransform(1, 0, 0, 1, 0, 0);
     g.clearRect(0, 0, flipCanvas.width, flipCanvas.height);
     // 平移到该子区域，使全局坐标绘制正确落在小画布上
     g.setTransform(flipScale, 0, 0, flipScale, -FLIP_RECT.x * flipScale, -FLIP_RECT.y * flipScale);
-    try { PS.drawFlippers(g); } catch (e) { return false; }
+    PS.drawInto(g, 'flip');
     flipTex.needsUpdate = true;
     return true;
   }
@@ -296,7 +457,7 @@
       if (!b) { m.visible = false; ballShadows[i].visible = false; continue; }
       const h = heightOf(b);
       m.visible = true;
-      m.position.set(wx(b.x), hz(h) + 9 * S, wz(b.y));
+      m.position.set(wx(b.x), worldH(h) + 9 * S, wz(b.y));
     }
 
     for (let i = 0; i < 2; i++) {
@@ -305,7 +466,7 @@
       const h = heightOf(b);
       const lift = Math.min(1, h / 60);
       shm.visible = true;
-      shm.position.set(wx(b.x) - 0.03, hz(h) + 0.008, wz(b.y) + 0.05);
+      shm.position.set(wx(b.x) - 0.03, worldH(h) + 0.008, wz(b.y) + 0.05);
       shm.material.opacity = 0.5 * (1 - lift * 0.4);
       const k = 0.40 + lift * 0.22;
       shm.scale.set(k, k, 1);
@@ -400,6 +561,20 @@
       : { ready: false };
     if (ok) console.log('R3 ready (layered perspective, art untouched)');
     if (ok) driveIfAsked();
+  }
+
+  // #diag：把渲染尺寸打到标题上，供无头检查（清晰度问题的直接证据）
+  if (location.hash.indexOf('#diag') >= 0) {
+    setTimeout(function () {
+      try {
+        const gl = document.getElementById('gl');
+        document.title = 'DIAG ' + JSON.stringify({
+          css: gl.clientWidth + 'x' + gl.clientHeight,
+          buf: gl.width + 'x' + gl.height,
+          pr: window.devicePixelRatio
+        });
+      } catch (e) { document.title = 'DIAGERR ' + e.message; }
+    }, 2500);
   }
 
   function driveIfAsked() {
