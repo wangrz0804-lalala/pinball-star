@@ -5095,59 +5095,54 @@ function drawLift(){
     ctx.stroke();
   }
 
-  // —— ⑦ 简洁金属导流入口：导流翼 + 吞球暗腔 + 发光环 + 箭头 ——
-  const inT = rampFrame(0);
-  const ang = Math.atan2(inT.dy, inT.dx);
+  // —— ⑦ 敞口坡道起点：只是槽的口子，不做"洞" ——
+  //    没有吞球暗腔、没有发光圆环：圆洞读成"球被吸进去"，而这里是一条敞开的槽——
+  //    冲得上去就沿槽上行，冲不上就滑回台面。可读性靠槽口受光唇 + 两侧导流翼。
+  const inF = rampFrame(0);
+  const hw0 = rampHalfW(0);
   ctx.save();
-  ctx.translate(R.x, R.y);
-  ctx.rotate(ang);
-  ctx.fillStyle = 'rgba(3,6,16,.92)';
-  ctx.beginPath(); ctx.arc(0, 0, R.r - 1, 0, 6.2832); ctx.fill();
+  ctx.translate(inF.x, inF.y);
+  ctx.rotate(Math.atan2(inF.dy, inF.dx));
+  // 导流翼：沿槽壁外侧张开的短翼，指出"往这儿冲"
   for (const side of [-1, 1]){
     ctx.beginPath();
-    ctx.moveTo(36, side * 28);
-    ctx.quadraticCurveTo(10, side * 24, -1, side * (R.r + 1));
+    ctx.moveTo(30, side * (hw0 + 12));
+    ctx.quadraticCurveTo(9, side * (hw0 + 7), 0, side * (hw0 + 1));
     ctx.strokeStyle = 'rgba(40,54,86,.9)'; ctx.lineWidth = 4; ctx.lineCap = 'round'; ctx.stroke();
     ctx.strokeStyle = hot ? 'rgba(150,190,240,.85)' : 'rgba(120,150,200,.4)';
     ctx.lineWidth = 2.2; ctx.stroke();
     ctx.beginPath();
-    ctx.moveTo(32, side * 24);
-    ctx.quadraticCurveTo(9, side * 21, -1, side * (R.r - 1));
+    ctx.moveTo(27, side * (hw0 + 10));
+    ctx.quadraticCurveTo(8, side * (hw0 + 6), 0, side * hw0);
     ctx.strokeStyle = 'rgba(220,238,255,.5)'; ctx.lineWidth = 1; ctx.stroke();
   }
-  ctx.lineWidth = 2.4;
-  ctx.strokeStyle = hot ? C.cyan : 'rgba(120,150,200,.5)';
-  if (hot){ ctx.shadowColor = C.cyan; ctx.shadowBlur = 10 + 4*Math.sin(state.time*5); }
-  ctx.beginPath(); ctx.arc(0, 0, R.r - 1, 0, 6.2832); ctx.stroke();
+  // 槽口金属唇：暗底 + 银白高光的双线，读作"槽口边缘被灯照到"，而不是一道发光门槛
+  ctx.lineCap = 'round';
+  const lipW = hw0 - 2;
+  ctx.strokeStyle = 'rgba(14,22,40,.92)'; ctx.lineWidth = 3.4;
+  ctx.beginPath(); ctx.moveTo(0, -lipW); ctx.lineTo(0, lipW); ctx.stroke();
+  ctx.strokeStyle = hot ? 'rgba(170,240,255,.95)' : 'rgba(160,196,240,.5)';
+  ctx.lineWidth = 1.6;
+  if (hot){ ctx.shadowColor = C.cyan; ctx.shadowBlur = 6 + 2*Math.sin(state.time*5); }
+  ctx.beginPath(); ctx.moveTo(0, -lipW); ctx.lineTo(0, lipW); ctx.stroke();
   ctx.shadowBlur = 0;
-  /* 入口不再画箭头：坡道读作"敞开的喇叭口"——球冲得进去就上桥，冲不进去自然滑回，
-     箭头会暗示"一定会进"，与动能判定冲突。喇叭口本身（导流翼 + 暗腔 + 发光环）保留。 */
   ctx.restore();
 
-  // —— ⑨ 与二层的喉口：喇叭状扩张 + 暗腔 + 受光唇 + 伸入过渡区的引导轨 ——
-  //    参考原版：坡道口不是"戳一个洞"，而是从窄槽**张开成喇叭**并入上层台面，
-  //    喉口外沿有一圈受光的金属唇，球从这里滑出去后落在过渡区。
+  // —— ⑧ 坡道并入二层：槽壁自 t≈0.84 起已归零贴回顶面（jFade），围裙板（②c）铺过接缝，
+  //    收口只留一道极淡的受光横线，不画洞口。
   const jf = rampFrame(1);
   ctx.save();
   ctx.translate(jf.x, jf.y);
   ctx.rotate(Math.atan2(jf.dy, jf.dx));
-  const mw = rampHalfW(1) + 2;
-  // 喉口 = 一个"张开的暗腔"：椭圆 + 极淡的张口渐变，不描硬边。
-  // （试过画实心喇叭，边缘会读成一块补丁；这里用柔和渐变，视觉上只是桥口变暗。）
-  const fg = ctx.createRadialGradient(0, 0, 1, 0, 0, mw + 7);
-  fg.addColorStop(0, 'rgba(2,5,12,.95)');
-  fg.addColorStop(0.72, 'rgba(6,12,26,.80)');
-  fg.addColorStop(1, 'rgba(10,18,38,0)');
-  ctx.fillStyle = fg;
-  ctx.beginPath(); ctx.ellipse(0, 0, mw + 7, mw + 3, 0, 0, 6.2832); ctx.fill();
-  // 上缘一道细受光唇：只在上半圈，读作"洞口边沿被灯照到"
-  ctx.strokeStyle = 'rgba(200,226,255,.46)'; ctx.lineWidth = 1.3;
-  ctx.beginPath(); ctx.ellipse(0, 0, mw + 5, mw + 1.5, 0, Math.PI * 1.05, Math.PI * 1.95); ctx.stroke();
-  ctx.restore();
+  ctx.beginPath(); ctx.ellipse(0, 0, 5, rampHalfW(1) - 0.5, 0, 0, 6.2832);
+  ctx.fillStyle = 'rgba(12,20,40,.62)'; ctx.fill();
+  ctx.lineCap = 'butt';
+  ctx.strokeStyle = 'rgba(200,226,255,.22)'; ctx.lineWidth = 1.2;
+  ctx.beginPath(); ctx.moveTo(0, -rampHalfW(1)); ctx.lineTo(0, rampHalfW(1)); ctx.stroke();
   ctx.restore();
 
   ctx.restore();
-  // 坡道末端开衔接口并入二层顶面：桥与二层是同一组件（见 ⑨ 与 ②b 加劲板）。
+  // 坡道末端并入二层顶面：桥与二层是同一组件（见 ⑧ 与 ②b 加劲板）。
 }
 
 function drawLiftWing(){
