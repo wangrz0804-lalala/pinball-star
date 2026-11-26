@@ -793,10 +793,14 @@ const PIVOTS = [
 ];
 
 // slingshot kickers: capsules parallel to the inlane, constant 54px offset
+/* 左右弹射器**不再镜像**：两侧可用宽度本来就不同。
+   左墙内表面 x=35，左弹射器外端 x=81 → 留 46px 通道；
+   右墙内表面 x=401，若镜像放到 399 就只剩 2px —— 球根本进不了右侧 inlane，
+   右挡板等于废掉。所以右侧整体内收：外端 376，留 25px 通道（球径 18）。 */
 const SLINGS = [
   {x1:81,  y1:606, x2:131, y2:633, r:9, pop:0},
-  {x1:399, y1:606, x2:349, y2:633, r:9, pop:0}
-];   // 严格镜像（480-x、同高）
+  {x1:376, y1:607, x2:338, y2:634, r:9, pop:0}
+];
 
 const BUMPERS = [
   {x:240, y:200, r:24, c:C.gold,    pop:0, hits:0},
@@ -837,9 +841,9 @@ const LANE_LAMPS = [-0.95, -1.86, -2.46].map(function(a){
 // scoring posts (ordinary, always lit)
 const POSTS = [
   {x:78,  y:438, r:10, c:C.violet, pop:0, pts:150},
-  /* 右翼柱下移：原来在 y=438，正好被落靶衬板占住那段墙。
-     挪到衬板下方（y=558），既让出衬板位置，也仍然守在上弹射器前方。 */
-  {x:400, y:558, r:10, c:C.violet, pop:0, pts:150}
+  /* 右翼柱放到落靶衬板的**顶点**上（原版楔形尖端本来就有颗柱）。
+     之前放在 y=558 —— 那正好是衬板底与右弹射器之间那段唯一通道，把它钉死了。 */
+  {x:382, y:418, r:8, c:C.violet, pop:0, pts:150}
 ];
 
 /* ============================ 原版补全区 ============================ */
@@ -853,11 +857,13 @@ const POSTS = [
 
    我们这里三段宽度递减（26 → 22 → 18），整体轮廓收窄成楔形，
    读作"从发射区旁边长出来的三角结构"，但占地始终只有 20 多像素。 */
+/* 竖向只占 356~480。**这一条是硬约束**：衬板底 480 → 右弹射器顶 597 必须留出
+   一整段敞开通道，否则球从右侧下来无路可走（上一版占到 554 就是这样堵死的）。 */
 const DROP_BANK = {
   WX: 402,                          // 内缘：贴发射道内墙外侧
-  T0: {x: 402, y: 366},             // 内上角
-  T1: {x: 372, y: 460},             // 外尖：朝场地的顶点，凸出 30px
-  T2: {x: 402, y: 554},             // 内下角
+  T0: {x: 402, y: 356},             // 内上角
+  T1: {x: 382, y: 418},             // 外尖：朝场地的顶点，凸出 20px
+  T2: {x: 402, y: 480},             // 内下角
   down: [false, false, false], pop: [0, 0, 0], cd: 0, resetT: 0
 };
 /* 三枚靶：上斜边两枚、下斜边一枚，围着外尖分布。
@@ -870,9 +876,9 @@ DROP_BANK.t = (function(){
     const nx = -dy / L, ny = dx / L;        // 外法向（朝场地）
     return {x: P.x + dx * u + nx * 2, y: P.y + dy * u + ny * 2};
   };
-  out.push(along(DROP_BANK.T0, DROP_BANK.T1, 0.56));
-  out.push(along(DROP_BANK.T1, DROP_BANK.T2, 0.30));
-  out.push(along(DROP_BANK.T1, DROP_BANK.T2, 0.74));
+  out.push(along(DROP_BANK.T0, DROP_BANK.T1, 0.50));
+  out.push(along(DROP_BANK.T1, DROP_BANK.T2, 0.24));
+  out.push(along(DROP_BANK.T1, DROP_BANK.T2, 0.70));
   return out;
 })();
 
@@ -4651,12 +4657,20 @@ function drawSlings(){
     ctx.save();
     ctx.lineCap = 'round';
 
-    ctx.strokeStyle = 'rgba(40,28,86,.95)';
-    ctx.lineWidth = 12;
-    ctx.beginPath(); ctx.moveTo(s.x2, s.y2); ctx.lineTo(foot.x, foot.y); ctx.stroke();
-    ctx.strokeStyle = 'rgba(126,96,205,.55)';
-    ctx.lineWidth = 1.6;
-    ctx.beginPath(); ctx.moveTo(s.x2, s.y2); ctx.lineTo(foot.x, foot.y); ctx.stroke();
+    /* 支脚只是"把胶囊托在导轨上"的一小段支架，**不走到导轨**：
+       原来从胶囊一路连到 inlane 上（12px 深紫实线），右侧窄口只有 25px，
+       那条线正好横在通道中间，看起来就是一道把路封死的墙。
+       现在只画 40% 长度 + 末端一颗螺栓，读作支撑，不读作拦路。 */
+    const bx = s.x2 + (foot.x - s.x2) * 0.40;
+    const by = s.y2 + (foot.y - s.y2) * 0.40;
+    ctx.strokeStyle = 'rgba(46,34,96,.55)';
+    ctx.lineWidth = 4.0;
+    ctx.beginPath(); ctx.moveTo(s.x2, s.y2); ctx.lineTo(bx, by); ctx.stroke();
+    ctx.strokeStyle = 'rgba(150,124,225,.40)';
+    ctx.lineWidth = 1.1;
+    ctx.beginPath(); ctx.moveTo(s.x2, s.y2); ctx.lineTo(bx, by); ctx.stroke();
+    ctx.fillStyle = 'rgba(122,96,190,.55)';
+    ctx.beginPath(); ctx.arc(bx, by, 2.4, 0, 6.2832); ctx.fill();
 
     // base bolt where the post meets the guide
     ctx.fillStyle = 'rgba(150,120,235,.5)';
@@ -6259,13 +6273,13 @@ function drawOutGates(){
       }
     } else {
       // 关闭态：闸口是一块与 inlane 齐平的盖板，压暗一档，细看才看得见
-      ctx.strokeStyle = 'rgba(40,52,84,.95)';
-      ctx.lineWidth = 9;
+      ctx.strokeStyle = 'rgba(40,52,84,.60)';
+      ctx.lineWidth = 6;
       ctx.beginPath();
       ctx.moveTo(og.ax, og.ay);
       ctx.lineTo(og.bx, og.by);
       ctx.stroke();
-      ctx.strokeStyle = 'rgba(108,138,196,.30)';
+      ctx.strokeStyle = 'rgba(108,138,196,.26)';
       ctx.lineWidth = 1.2;
       ctx.beginPath();
       ctx.moveTo(og.ax, og.ay);
@@ -6317,25 +6331,14 @@ function drawOutGates(){
         ctx.strokeStyle = 'rgba(255,250,255,.85)';
         ctx.lineWidth = 1.1; ctx.stroke();
       } else {
-        /* 静止：一条压进台面的深紫色凹槽。读作"这里预埋了一根杆"，
-           所以球压上去不会有"穿过实体"的违和感；开闸时它整体升起并通电。 */
-        ctx.strokeStyle = 'rgba(22,14,50,.66)';
-        ctx.lineWidth = 7.5;
-        barPath(); ctx.stroke();
-        ctx.strokeStyle = 'rgba(46,30,92,.80)';
-        ctx.lineWidth = 4.6;
-        barPath(); ctx.stroke();
-        // 上沿一线极淡的高光：把"槽"和"杆"区分开（槽有内阴影）
-        ctx.strokeStyle = 'rgba(112,86,182,.26)';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(bx0, by0 - 1.6); ctx.lineTo(bx1, by1 - 1.6);
-        ctx.stroke();
-        // 铰链座：常态只是一个压暗的圆坑
-        ctx.fillStyle = 'rgba(34,22,70,.85)';
-        ctx.beginPath(); ctx.arc(bx0, by0, 3.2, 0, 6.2832); ctx.fill();
-        ctx.strokeStyle = 'rgba(92,70,158,.38)';
-        ctx.lineWidth = 1; ctx.stroke();
+      }
+      /* 关闭态**不画杆**：这根杆按设定是"缩回弹射器内"的。
+         画出来只会变成台面上一根悬空的小棍——既不像槽也不像杆，
+         在右侧那段 25px 窄口里尤其会被读成"拦路的横杆"。 */
+      if (!og.open){
+        // 只留铰链座一个压暗的圆坑，说明这里有个机构
+        ctx.fillStyle = 'rgba(30,20,62,.52)';
+        ctx.beginPath(); ctx.arc(bx0, by0, 2.6, 0, 6.2832); ctx.fill();
       }
     }
     ctx.restore();
