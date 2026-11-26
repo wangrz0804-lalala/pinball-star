@@ -6198,39 +6198,86 @@ function drawOutGates(){
         ctx.lineTo(mx + 5, cy);
         ctx.stroke();
       }
-      // 紫色弹射挡板：与弹射器同款胶囊材质，从弹射器支脚弹出压住通道
-      if (og.bar){
-        ctx.lineCap = 'round';
-        ctx.shadowColor = 'rgba(190,145,255,' + (0.55 + pulse * 0.3) + ')';
-        ctx.shadowBlur = 18;
-        ctx.strokeStyle = 'rgba(78,52,152,.95)';
-        ctx.lineWidth = 12;
-        ctx.beginPath(); ctx.moveTo(og.bar.ax, og.bar.ay); ctx.lineTo(og.bar.bx, og.bar.by); ctx.stroke();
-        ctx.shadowBlur = 0;
-        ctx.strokeStyle = 'rgba(188,148,255,' + (0.9 + pulse * 0.1) + ')';
-        ctx.lineWidth = 9;
-        ctx.beginPath(); ctx.moveTo(og.bar.ax, og.bar.ay); ctx.lineTo(og.bar.bx, og.bar.by); ctx.stroke();
-        ctx.strokeStyle = 'rgba(255,248,255,.7)';
-        ctx.lineWidth = 2.4;
-        ctx.beginPath(); ctx.moveTo(og.bar.ax, og.bar.ay); ctx.lineTo(og.bar.bx, og.bar.by); ctx.stroke();
-        // 铰链座（弹射器支脚）
-        ctx.fillStyle = 'rgba(150,120,235,.5)';
-        ctx.beginPath(); ctx.arc(og.bar.ax, og.bar.ay, 4.5, 0, 6.2832); ctx.fill();
-      }
     } else {
-      // closed plate: flush with the inlane, slightly darker so keen eyes spot it
-      ctx.strokeStyle = 'rgba(52,66,102,.95)';
+      // 关闭态：闸口是一块与 inlane 齐平的盖板，压暗一档，细看才看得见
+      ctx.strokeStyle = 'rgba(40,52,84,.95)';
       ctx.lineWidth = 9;
       ctx.beginPath();
       ctx.moveTo(og.ax, og.ay);
       ctx.lineTo(og.bx, og.by);
       ctx.stroke();
-      ctx.strokeStyle = 'rgba(120,150,210,.35)';
+      ctx.strokeStyle = 'rgba(108,138,196,.30)';
       ctx.lineWidth = 1.2;
       ctx.beginPath();
       ctx.moveTo(og.ax, og.ay);
       ctx.lineTo(og.bx, og.by);
       ctx.stroke();
+    }
+
+    /* 挡杆：台面上常驻的一条深紫色槽（就是弹射器支脚延伸出来的那条线）。
+       关闭时它只是槽——压暗、贴地，不暗示实体；闸门开启时同一条线通电变色、
+       杆体升起封住通道。一根杆两种状态，不再凭空冒出一根亮紫色胶囊。 */
+    if (og.bar){
+      const bx0 = og.bar.ax, by0 = og.bar.ay, bx1 = og.bar.bx, by1 = og.bar.by;
+      const barPath = function(){
+        ctx.beginPath(); ctx.moveTo(bx0, by0); ctx.lineTo(bx1, by1);
+      };
+      ctx.lineCap = 'round';
+      if (og.open){
+        const pk = 0.5 + 0.5 * Math.sin(state.time * 9);
+        // 外发光
+        ctx.shadowColor = 'rgba(198,124,255,' + (0.60 + pk * 0.32) + ')';
+        ctx.shadowBlur = 22;
+        ctx.strokeStyle = 'rgba(80,38,146,.98)';
+        ctx.lineWidth = 11.5;
+        barPath(); ctx.stroke();
+        ctx.shadowBlur = 0;
+        // 杆体：由深紫转亮紫（同一根杆的"通电"状态）
+        const gb = ctx.createLinearGradient(bx0, by0, bx1, by1);
+        gb.addColorStop(0, 'rgba(150,96,236,.99)');
+        gb.addColorStop(0.55, 'rgba(198,138,255,.99)');
+        gb.addColorStop(1, 'rgba(150,96,236,.99)');
+        ctx.strokeStyle = gb;
+        ctx.lineWidth = 8.6;
+        barPath(); ctx.stroke();
+        // 内芯高光
+        ctx.strokeStyle = 'rgba(248,230,255,' + (0.72 + pk * 0.28) + ')';
+        ctx.lineWidth = 2.4;
+        barPath(); ctx.stroke();
+        // 能量流：沿杆跑三个亮点，读作"这条线带电了"
+        for (let s2 = 0; s2 < 3; s2++){
+          const u = ((state.time * 1.1 + s2 / 3) % 1);
+          ctx.beginPath();
+          ctx.arc(bx0 + (bx1 - bx0) * u, by0 + (by1 - by0) * u, 2.1, 0, 6.2832);
+          ctx.fillStyle = 'rgba(255,244,255,.92)';
+          ctx.fill();
+        }
+        // 铰链座：通电时亮起
+        ctx.fillStyle = 'rgba(216,172,255,.9)';
+        ctx.beginPath(); ctx.arc(bx0, by0, 4.6, 0, 6.2832); ctx.fill();
+        ctx.strokeStyle = 'rgba(255,250,255,.85)';
+        ctx.lineWidth = 1.1; ctx.stroke();
+      } else {
+        /* 静止：一条压进台面的深紫色凹槽。读作"这里预埋了一根杆"，
+           所以球压上去不会有"穿过实体"的违和感；开闸时它整体升起并通电。 */
+        ctx.strokeStyle = 'rgba(22,14,50,.66)';
+        ctx.lineWidth = 7.5;
+        barPath(); ctx.stroke();
+        ctx.strokeStyle = 'rgba(46,30,92,.80)';
+        ctx.lineWidth = 4.6;
+        barPath(); ctx.stroke();
+        // 上沿一线极淡的高光：把"槽"和"杆"区分开（槽有内阴影）
+        ctx.strokeStyle = 'rgba(112,86,182,.26)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(bx0, by0 - 1.6); ctx.lineTo(bx1, by1 - 1.6);
+        ctx.stroke();
+        // 铰链座：常态只是一个压暗的圆坑
+        ctx.fillStyle = 'rgba(34,22,70,.85)';
+        ctx.beginPath(); ctx.arc(bx0, by0, 3.2, 0, 6.2832); ctx.fill();
+        ctx.strokeStyle = 'rgba(92,70,158,.38)';
+        ctx.lineWidth = 1; ctx.stroke();
+      }
     }
     ctx.restore();
   }
