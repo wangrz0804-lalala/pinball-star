@@ -2923,8 +2923,8 @@ function stepBall(b, dt){
        柱子升起 36px、宽 15px，一个半径 9 的圆只盖住中段，球会从柱顶穿过去。
        线段从柱顶（孔口上方 36）一直连到孔口，半径 7.5 = 柱身半宽。 */
     if (CENTER_POST.up > 0.05){
-      resolveSeg(b, CENTER_POST.x, CENTER_POST.y + 2 - 36 * CENTER_POST.up,
-                 CENTER_POST.x, CENTER_POST.y + 2, 7.5, 0.45);
+      resolveSeg(b, CENTER_POST.x, CENTER_POST.y + 2 - 44 * CENTER_POST.up,
+                 CENTER_POST.x, CENTER_POST.y + 2, 5.6, 0.45);
     }
     // 危险带：纯传感器，滚过即点亮
     for (let k = 0; k < HAZARDS.length; k++){
@@ -5053,23 +5053,33 @@ function drawHazards(){
    up=1 升到最高（柱顶高出孔口 22px）。
    画法顺序很重要：先把孔口重新压暗一遍（柱子挡住了原本的孔），
    再画柱子，最后在孔口补一圈"被顶开的光"——这样才读作"从洞里顶出来"。 */
+/* 中央挡柱：从排水孔里升起。
+   up=0 完全缩回；up=1 升到最高（柱顶高出孔口 36px，顶到两挡板尖端之间）。
+   画法有四处讲究，缺一处就"穿模"：
+     ① 柱身底端**不越过孔口椭圆的中心**（越过去就会从洞里穿出来）
+     ② 顶帽是**扁圆盘**，不是圆球 —— 圆球会和球叠成两个圆，糊成一坨
+     ③ 孔沿冷光只描**上半圈**（下半圈描了就是一条横穿柱子的线）
+     ④ 最后补一圈**孔口前唇**（下半弧）盖住柱根，读作"洞口前沿挡住柱子"
+   绘制位置在 drawBalls('lower') **之前**：柱子是地面机构，球压在它前面是正确的
+   （物理上 resolveSeg 会把球弹开，正常不会重叠）。 */
 function drawCenterPost(){
   const p = CENTER_POST;
   if (p.up <= 0.02) return;
-  /* 升起高度 36：柱顶到 y≈738，正好顶到两挡板尖端之间，
-     挡住中央直落 —— 这才是中央挡柱该起的作用（原来只升 22，柱顶还在孔里）。 */
-  const lift = 36 * p.up;
-  const topY = p.y + 2 - lift;          // 孔口略低于中心
+  const lift = 44 * p.up;
+  const holeCY = p.y + 2;               // 孔口椭圆中心
+  const topY = holeCY - lift;
+  const SW = 5.6;                       // 柱身半宽：细一点才像"杆"，粗了成蘑菇
   ctx.save();
 
-  /* ① 孔口内侧阴影：柱子撑满了孔，孔壁被挡住的暗色 */
-  ctx.beginPath(); ctx.ellipse(p.x, p.y + 2, p.holeR, p.holeRy, 0, 0, 6.2832);
+  /* ① 孔内阴影（柱子挡住的暗色） */
+  ctx.beginPath(); ctx.ellipse(p.x, holeCY, p.holeR, p.holeRy, 0, 0, 6.2832);
   ctx.fillStyle = 'rgba(2,3,8,.96)';
   ctx.fill();
 
-  /* ② 柱身：从孔里伸出来的一段金属杆，越靠近孔口越暗（在洞里） */
-  const shaftTop = topY;
-  const shaftBot = p.y + 6;             // 沉进孔口一点
+  /* ② 柱身：底端收在**孔口中心以上 3px**。
+     柱底必须在洞口前沿（椭圆下半圈）之内，让下半盘那层遮挡把它整个吞掉；
+     落在中心线上就会露出一小截方形截面，读作"柱子卡在洞口"。 */
+  const shaftBot = holeCY - 3;
   const sg = ctx.createLinearGradient(p.x - 8, 0, p.x + 8, 0);
   sg.addColorStop(0,    'rgba(10,16,32,.99)');
   sg.addColorStop(0.26, 'rgba(104,136,186,.99)');
@@ -5078,63 +5088,90 @@ function drawCenterPost(){
   sg.addColorStop(1,    'rgba(10,16,32,.99)');
   ctx.fillStyle = sg;
   ctx.beginPath();
-  ctx.moveTo(p.x - 7.5, shaftBot);
-  ctx.lineTo(p.x - 7.5, shaftTop);
-  ctx.arc(p.x, shaftTop, 7.5, Math.PI, Math.PI * 2);
-  ctx.lineTo(p.x + 7.5, shaftBot);
+  ctx.moveTo(p.x - SW, shaftBot);
+  ctx.lineTo(p.x - SW, topY);
+  ctx.lineTo(p.x + SW, topY);
+  ctx.lineTo(p.x + SW, shaftBot);
   ctx.closePath();
   ctx.fill();
-  // 柱身暗底轮廓：让柱从暗孔里"立"出来，边缘不糊
   ctx.strokeStyle = 'rgba(4,7,16,.85)';
   ctx.lineWidth = 1.1;
   ctx.stroke();
+  /* 柱底渐隐：最后 8px 用孔口暗色压一遍，柱身没入洞口时不出现硬边 */
+  const fadeG = ctx.createLinearGradient(0, shaftBot - 8, 0, shaftBot + 1);
+  fadeG.addColorStop(0, 'rgba(4,7,16,0)');
+  fadeG.addColorStop(1, 'rgba(4,7,16,.98)');
+  ctx.fillStyle = fadeG;
+  ctx.fillRect(p.x - SW - 0.6, shaftBot - 8, (SW + 0.6) * 2, 10);
 
-  /* ③ 两圈箍环：金属杆的关节，读作"机械活塞"而不是一根光管 */
+  /* ③ 两圈箍环 */
   for (const u of [0.34, 0.70]){
-    const yy = shaftBot + (shaftTop - shaftBot) * u;
-    ctx.beginPath(); ctx.ellipse(p.x, yy, 8, 2.2, 0, 0, 6.2832);
+    const yy = shaftBot + (topY - shaftBot) * u;
+    ctx.beginPath(); ctx.ellipse(p.x, yy, SW + 0.5, 1.9, 0, 0, 6.2832);
     ctx.fillStyle = 'rgba(30,46,76,.95)';
     ctx.fill();
-    ctx.strokeStyle = 'rgba(178,208,248,.55)';
+    ctx.strokeStyle = 'rgba(178,208,248,.5)';
     ctx.lineWidth = 0.9;
     ctx.stroke();
   }
 
-  /* ④ 顶帽：半球 + 高光 */
-  const capG = ctx.createLinearGradient(p.x - p.r, topY - p.r, p.x + p.r, topY);
-  capG.addColorStop(0, 'rgba(228,242,255,.98)');
-  capG.addColorStop(0.55, 'rgba(150,190,240,.98)');
-  capG.addColorStop(1, 'rgba(52,74,112,.98)');
-  ctx.beginPath(); ctx.arc(p.x, topY, p.r + 1.2, 0, 6.2832);
+  /* ④ 顶帽：**扁圆盘**（不是圆球）。圆球会和球叠成两个圆。 */
+  const capRx = SW + 1.8, capRy = 3.0;
+  ctx.beginPath(); ctx.ellipse(p.x, topY, capRx, capRy, 0, 0, 6.2832);
+  const capG = ctx.createLinearGradient(p.x - capRx, topY - capRy, p.x + capRx, topY + capRy);
+  capG.addColorStop(0, 'rgba(232,244,255,.98)');
+  capG.addColorStop(0.5, 'rgba(150,190,240,.98)');
+  capG.addColorStop(1, 'rgba(48,68,104,.98)');
   ctx.fillStyle = capG;
   ctx.fill();
-  ctx.strokeStyle = 'rgba(214,238,255,.80)';
-  ctx.lineWidth = 1.1;
+  ctx.strokeStyle = 'rgba(214,238,255,.78)';
+  ctx.lineWidth = 1;
   ctx.stroke();
+  // 帽面上一道横向高光，进一步强调"这是块盘"，不是球
   ctx.beginPath();
-  ctx.arc(p.x - 2.4, topY - 2.6, p.r * 0.34, 0, 6.2832);
-  ctx.fillStyle = 'rgba(255,255,255,.85)';
+  ctx.ellipse(p.x - 1.6, topY - 0.9, capRx * 0.52, capRy * 0.34, 0, 0, 6.2832);
+  ctx.fillStyle = 'rgba(255,255,255,.60)';
   ctx.fill();
 
-  /* ⑤ 孔沿内壁的冷光：柱子升起时把孔口照亮，说明"是从这里出来的" */
+  /* ⑤ 孔沿冷光：**只描上半圈**（π..2π）。
+     整个椭圆都描的话，下半圈那条线会横穿柱子，就是穿模。 */
   ctx.beginPath();
-  ctx.ellipse(p.x, p.y + 2, p.holeR - 1, p.holeRy - 0.6, 0, 0, 6.2832);
-  ctx.strokeStyle = 'rgba(94,231,255,' + (0.24 + 0.30 * p.up) + ')';
-  ctx.lineWidth = 1.6;
-  ctx.stroke();
-  // 上方半圈的受光更强（光从台面上方来）
-  ctx.beginPath();
-  ctx.ellipse(p.x, p.y + 2, p.holeR - 1, p.holeRy - 0.6, 0, Math.PI * 1.06, Math.PI * 1.94);
-  ctx.strokeStyle = 'rgba(200,240,255,' + (0.30 + 0.34 * p.up) + ')';
-  ctx.lineWidth = 1.2;
+  ctx.ellipse(p.x, holeCY, p.holeR - 1, p.holeRy - 0.6, 0, Math.PI, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(200,240,255,' + (0.28 + 0.34 * p.up) + ')';
+  ctx.lineWidth = 1.4;
   ctx.stroke();
 
-  /* ⑥ 剩余时间环：画在顶帽上方，不压柱子 */
+  /* ⑥ 孔口前唇：**遮挡**，不是描边。
+     只描一条弧的话柱子照样露在外面（描边盖不住填充）。
+     这里用椭圆下半盘 clip 后填暗色，把柱子根部真正盖住 ——
+     柱子可见部分只剩孔口中心以上，读作"从洞里升出来"。
+     然后在孔沿下弧补一条金属亮唇，作为孔口的物理边。 */
+  ctx.save();
+  ctx.beginPath();
+  ctx.ellipse(p.x, holeCY, p.holeR, p.holeRy, 0, 0, Math.PI);   // 下半弧
+  ctx.closePath();                                              // 闭合 → 下半盘
+  ctx.clip();
+  ctx.fillStyle = 'rgba(4,7,16,.96)';
+  ctx.fillRect(p.x - p.holeR - 1, holeCY - 1.2, (p.holeR + 1) * 2, p.holeRy + 4);
+  ctx.restore();
+  // 孔沿下弧的金属亮唇（孔口前沿被灯照到的一线）
+  ctx.beginPath();
+  ctx.ellipse(p.x, holeCY, p.holeR, p.holeRy, 0, 0.06 * Math.PI, 0.94 * Math.PI);
+  ctx.strokeStyle = 'rgba(150,196,240,.62)';
+  ctx.lineWidth = 1.4;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.ellipse(p.x, holeCY, p.holeR - 1.6, p.holeRy - 1.2, 0, 0.10 * Math.PI, 0.90 * Math.PI);
+  ctx.strokeStyle = 'rgba(60,84,124,.55)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  /* ⑦ 剩余时间环：画在顶帽外圈，不压柱身 */
   const k = Math.max(0, Math.min(1, p.t / 6));
   ctx.beginPath();
-  ctx.arc(p.x, topY, p.r + 5, -Math.PI / 2, -Math.PI / 2 + 6.2832 * k);
+  ctx.ellipse(p.x, topY, capRx + 4, capRy + 3, 0, -Math.PI / 2, -Math.PI / 2 + 6.2832 * k);
   ctx.strokeStyle = 'rgba(94,231,255,.85)';
-  ctx.lineWidth = 1.6;
+  ctx.lineWidth = 1.5;
   ctx.stroke();
   ctx.restore();
 }
