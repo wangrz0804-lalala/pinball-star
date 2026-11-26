@@ -5479,6 +5479,27 @@ function blitLayer(cache, alpha, clipH){
 
 /* 沿不规则轮廓按比例内缩生成同心路径：scale=1 为原轮廓，<1 向内收。
    这是替代旧版 ctx.arc 同心圆的关键——让所有装饰跟随平台的多边形形状。 */
+/* 甲板外缘描边，但允许**留缺口**：gap = {x,y,r}（顶面坐标系，已含 -z 抬升），
+   落在圆里的边段不描。坡道末端就在这里接进来——不开口的话，那条闭合轮廓
+   会把坡道切断，读作"坡道戳进一个封闭的盒子"。 */
+function deckEdgeStroke(dy, gap){
+  const p = DECK2.poly;
+  const N = 12;
+  ctx.beginPath();
+  for (let i = 0; i < p.length; i++){
+    const a = p[i], b = p[(i + 1) % p.length];
+    for (let k = 0; k < N; k++){
+      const x0 = a.x + (b.x - a.x) * (k / N), y0 = a.y + (b.y - a.y) * (k / N) + (dy || 0);
+      const x1 = a.x + (b.x - a.x) * ((k + 1) / N), y1 = a.y + (b.y - a.y) * ((k + 1) / N) + (dy || 0);
+      if (gap){
+        const mx = (x0 + x1) / 2 - gap.x, my = (y0 + y1) / 2 - gap.y;
+        if (mx * mx + my * my < gap.r * gap.r) continue;
+      }
+      ctx.moveTo(x0, y0); ctx.lineTo(x1, y1);
+    }
+  }
+}
+
 function deckInsetPath(scale, dy){
   const p = DECK2.poly, cx = DECK2.cx, cy = DECK2.cy;
   ctx.beginPath();
@@ -5620,12 +5641,27 @@ function drawDeckTopRaw(){
 
   // 护栏：沿外缘一圈矮墙（跟随不规则轮廓），淡出时依然保留，二层轮廓永不消失
   ctx.globalAlpha = 1;
-  // 顶面外缘受光 rim：slab 的"上棱"高光，厚度感的关键一笔
-  deckInsetPath(1, 0); ctx.strokeStyle = 'rgba(214,236,255,.72)'; ctx.lineWidth = 2; ctx.stroke();
+  /* 顶面外缘受光 rim：slab 的"上棱"高光，厚度感的关键一笔。
+     但坡道接入处必须留缺口 —— 这里是"甲板边缘开口、坡道直接接进来"，
+     不是"坡道插进一个封闭轮廓"。缺口位置 = 坡道交付点（已含 -z 抬升）。 */
+  /* 缺口位置必须落在**坡道穿过甲板边缘的那个交点**上：
+     取坡道末端沿切线往回退 26px（往回 = 甲板外侧），就是它穿过边缘的地方。
+     注意：rampFrame(1) 的切线是退化值（它用 t+0.01 采样，到 1 就重合了），
+     所以方向要取 rampFrame(0.94)。 */
+  const rampJ = rampFrame(1), rampD = rampFrame(0.94);
+  const rampGap = {
+    x: RAMP.tx - rampD.dx * 26,
+    y: RAMP.ty - rampD.dy * 26,     // 绘制坐标：translate(0,-z) 已生效，直接与 poly 的 y 比
+    r: 23
+  };
+  deckEdgeStroke(0, rampGap);
+  ctx.strokeStyle = 'rgba(214,236,255,.72)'; ctx.lineWidth = 2; ctx.stroke();
   deckInsetPath(0.985, 1.5); ctx.strokeStyle = 'rgba(120,160,220,.32)'; ctx.lineWidth = 1; ctx.stroke();
   deckInsetPath(0.86, 0); ctx.strokeStyle = 'rgba(200,225,255,.20)'; ctx.lineWidth = 1; ctx.stroke();
-  // 护栏立柱：每个顶点一根短柱
+  // 护栏立柱：每个顶点一根短柱；坡道接入那一段不放柱（否则柱正好立在槽口中间）
   for (let i = 0; i < p.length; i++){
+    const gx = p[i].x - rampGap.x, gy = p[i].y - rampGap.y;
+    if (gx * gx + gy * gy < rampGap.r * rampGap.r) continue;
     ctx.strokeStyle = 'rgba(170,205,255,.5)'; ctx.lineWidth = 2;
     ctx.beginPath(); ctx.moveTo(p[i].x, p[i].y); ctx.lineTo(p[i].x, p[i].y + 7); ctx.stroke();
   }
@@ -5979,17 +6015,49 @@ function drawLift(){
   ctx.shadowBlur = 0;
   ctx.restore();
 
-  // —— ⑧ 坡道并入二层：槽壁自 t≈0.84 起已归零贴回顶面（jFade），围裙板（②c）铺过接缝，
-  //    收口只留一道极淡的受光横线，不画洞口。
+  /* —— ⑧ 坡道末端接进二层：**不画封口** ——
+     之前这里画了一个圆头 + 一道横线，读作"坡道到头了、球被甩出去"。
+     现在沿切线把槽底继续延伸 34px，穿过甲板外缘（那里已经开口，见 deckEdgeStroke），
+     侧轨用 alpha 渐变淡出 —— 读作"坡道一直铺进平台，二者是同一个东西"。 */
   const jf = rampFrame(1);
+  /* rampFrame(1) 的切线/dx,dy 是退化的 0（内部用 t+0.01 采样，t=1 时采到同一点）。
+     方向必须回退到 0.94 取，否则延伸段的宽度和位移都是 0，等于没画。 */
+  const jd = rampFrame(0.94);
+  const wEnd = rampHalfW(1);
+  const rx = -jd.dy, ry = jd.dx;                    // 法向
+  const ex2 = jf.x + jd.dx * 36, ey2 = jf.y + jd.dy * 36;
   ctx.save();
-  ctx.translate(jf.x, jf.y);
-  ctx.rotate(Math.atan2(jf.dy, jf.dx));
-  ctx.beginPath(); ctx.ellipse(0, 0, 5, rampHalfW(1) - 0.5, 0, 0, 6.2832);
-  ctx.fillStyle = 'rgba(12,20,40,.62)'; ctx.fill();
-  ctx.lineCap = 'butt';
-  ctx.strokeStyle = 'rgba(200,226,255,.22)'; ctx.lineWidth = 1.2;
-  ctx.beginPath(); ctx.moveTo(0, -rampHalfW(1)); ctx.lineTo(0, rampHalfW(1)); ctx.stroke();
+  // 延伸段槽底：与主槽同色，保证视觉连续
+  ctx.beginPath();
+  ctx.moveTo(jf.x + rx * wEnd, jf.y + ry * wEnd);
+  ctx.lineTo(ex2 + rx * wEnd * 0.90, ey2 + ry * wEnd * 0.90);
+  ctx.lineTo(ex2 - rx * wEnd * 0.90, ey2 - ry * wEnd * 0.90);
+  ctx.lineTo(jf.x - rx * wEnd, jf.y - ry * wEnd);
+  ctx.closePath();
+  const eg = ctx.createLinearGradient(jf.x, jf.y, ex2, ey2);
+  eg.addColorStop(0, 'rgba(12,20,40,.62)');
+  eg.addColorStop(0.6, 'rgba(11,18,36,.48)');
+  eg.addColorStop(1, 'rgba(10,17,34,.16)');
+  ctx.fillStyle = eg;
+  ctx.fill();
+  // 槽底中缝继续延伸（与 ③ 那条暗沟对齐）
+  const mg = ctx.createLinearGradient(jf.x, jf.y, ex2, ey2);
+  mg.addColorStop(0, 'rgba(4,8,18,.70)');
+  mg.addColorStop(1, 'rgba(4,8,18,0)');
+  ctx.strokeStyle = mg; ctx.lineWidth = 3; ctx.lineCap = 'butt';
+  ctx.beginPath(); ctx.moveTo(jf.x, jf.y); ctx.lineTo(ex2, ey2); ctx.stroke();
+  // 两侧导轨延伸：越往前越淡，最后融进甲板顶面
+  for (const s of [-1, 1]){
+    const rg2 = ctx.createLinearGradient(jf.x, jf.y, ex2, ey2);
+    rg2.addColorStop(0, 'rgba(186,214,250,.72)');
+    rg2.addColorStop(0.65, 'rgba(150,186,236,.28)');
+    rg2.addColorStop(1, 'rgba(130,170,225,0)');
+    ctx.strokeStyle = rg2; ctx.lineWidth = 1.6; ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(jf.x + rx * wEnd * s, jf.y + ry * wEnd * s);
+    ctx.lineTo(ex2 + rx * wEnd * 0.90 * s, ey2 + ry * wEnd * 0.90 * s);
+    ctx.stroke();
+  }
   ctx.restore();
 
   ctx.restore();
