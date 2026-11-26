@@ -904,7 +904,10 @@ const HAZARDS = [
 
 /* ③ 中央挡柱 (Center Post)：排水口正中的可升降立柱，升起时封住中央直落。
    由危险带填满触发（原版 Center Post 的用法）。 */
-const CENTER_POST = {x:240, y:756, r:7, up:0, t:0};
+/* 中央挡柱：立在**两挡板尖端之间**（y=740），不是排水孔里。
+   排水孔在 (240,772)，原来柱子放在 756 —— 底部正好坐进孔口，
+   看起来就像"从洞里弹出来"。尖端连线在 y≈747，柱子放 740 正好夹在中间。 */
+const CENTER_POST = {x:240, y:740, r:7, up:0, t:0};
 
 /* ④ 超空间 (Hyperspace)：环道顶点的 rollover。三盏星道灯全亮后冲过顶点，
    触发一次超空间发射：大额奖励 + 倍率，并清空星道灯重来。 */
@@ -2916,8 +2919,11 @@ function stepBall(b, dt){
       if (resolveCirc(b, dtg.x, dtg.y, 8, 0.42)) hitDropTarget(i);
     }
     // 中央挡柱：只在升起时是实体
+    /* 挡柱碰撞取**柱身中点**而不是顶帽：原来圆心跟着帽子上移 20*up，
+       球从上面落下来时柱身那段是空的，会直接穿过去。 */
     if (CENTER_POST.up > 0.05){
-      resolveCirc(b, CENTER_POST.x, CENTER_POST.y - 20 * CENTER_POST.up, CENTER_POST.r, 0.45);
+      resolveCirc(b, CENTER_POST.x, CENTER_POST.y - 10 * CENTER_POST.up,
+                  CENTER_POST.r + 1, 0.45);
     }
     // 危险带：纯传感器，滚过即点亮
     for (let k = 0; k < HAZARDS.length; k++){
@@ -5045,9 +5051,21 @@ function drawCenterPost(){
   const lift = 20 * p.up;
   const topY = p.y - lift;
   ctx.save();
-  // 底座（坑口）
-  ctx.fillStyle = 'rgba(6,10,22,.9)';
-  ctx.beginPath(); ctx.ellipse(p.x, p.y, 10, 4.5, 0, 0, 6.2832); ctx.fill();
+  /* 底座是**从台面升起的机构**：一圈金属法兰 + 内圈亮环。
+     原来画的是一块暗椭圆（读作洞口），柱子从里面长出来就像"从洞里弹出"。 */
+  ctx.beginPath(); ctx.ellipse(p.x, p.y + 1, 11.5, 5, 0, 0, 6.2832);
+  const baseG = ctx.createLinearGradient(p.x - 11.5, 0, p.x + 11.5, 0);
+  baseG.addColorStop(0, 'rgba(20,30,54,.98)');
+  baseG.addColorStop(0.45, 'rgba(116,146,196,.98)');
+  baseG.addColorStop(1, 'rgba(20,30,54,.98)');
+  ctx.fillStyle = baseG;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(190,220,255,.55)'; ctx.lineWidth = 1;
+  ctx.stroke();
+  // 内圈亮环：读作"柱子的安装座"
+  ctx.beginPath(); ctx.ellipse(p.x, p.y + 1, 7.5, 3.2, 0, 0, 6.2832);
+  ctx.strokeStyle = 'rgba(214,238,255,.42)'; ctx.lineWidth = 1.1;
+  ctx.stroke();
   // 柱身：左暗右亮的圆柱
   const g = ctx.createLinearGradient(p.x - 7, 0, p.x + 7, 0);
   g.addColorStop(0, 'rgba(10,16,32,.98)');
