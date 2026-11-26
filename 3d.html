@@ -5713,16 +5713,11 @@ function drawDeckTopRaw(){
   /* 顶面外缘受光 rim：slab 的"上棱"高光，厚度感的关键一笔。
      但坡道接入处必须留缺口 —— 这里是"甲板边缘开口、坡道直接接进来"，
      不是"坡道插进一个封闭轮廓"。缺口位置 = 坡道交付点（已含 -z 抬升）。 */
-  /* 缺口位置必须落在**坡道穿过甲板边缘的那个交点**上：
-     取坡道末端沿切线往回退 26px（往回 = 甲板外侧），就是它穿过边缘的地方。
-     注意：rampFrame(1) 的切线是退化值（它用 t+0.01 采样，到 1 就重合了），
-     所以方向要取 rampFrame(0.94)。 */
-  const rampJ = rampFrame(1), rampD = rampFrame(0.94);
-  const rampGap = {
-    x: RAMP.tx - rampD.dx * 26,
-    y: RAMP.ty - rampD.dy * 26,     // 绘制坐标：translate(0,-z) 已生效，直接与 poly 的 y 比
-    r: 23
-  };
+  /* 缺口 = 坡道中心线穿过甲板轮廓的那一点，半径按坡道在该处的实际半宽算。
+     这样缺口宽度正好等于坡道槽宽：坡道侧轨停在哪，甲板边缘就从哪开始，
+     两条边界是一条线。 */
+  const RCg = rampDeckCross();
+  const rampGap = {x: RCg.x, y: RCg.y, r: RCg.w + 6};
   deckEdgeStroke(0, rampGap);
   ctx.strokeStyle = 'rgba(214,236,255,.72)'; ctx.lineWidth = 2; ctx.stroke();
   deckInsetPath(0.985, 1.5); ctx.strokeStyle = 'rgba(120,160,220,.32)'; ctx.lineWidth = 1; ctx.stroke();
@@ -5836,7 +5831,12 @@ function rampPoint(t){
    配合桥墩与地面投影，是读作 3D 架空桥的核心。 */
 function rampH(t){
   t = Math.max(0, Math.min(1, t));
-  return DECK3D.z * (1 - Math.pow(1 - t, 2.8));   // 2.8：更早饱和到二层高度，桥尾与顶面平齐滑行再融入
+  /* 末段必须**提前饱和**到甲板高度。
+     原来 t=1 才等于 DECK3D.z：坡道在穿过甲板轮廓的那一刻还差十几像素高度，
+     所以"坡道的边界"和"甲板的边界"永远接不上（中间一道缝+一段高差）。
+     0.86 起齐平，坡道最后一段与甲板顶面同高，真正并进去。 */
+  const k = Math.min(1, t / 0.86);
+  return DECK3D.z * (1 - Math.pow(1 - k, 2.8));
 }
 /* 取坡道在 t 处的切向与法向（屏幕坐标，含架空抬升 lift） */
 function rampFrame(t){
@@ -5847,14 +5847,44 @@ function rampFrame(t){
   return {x:p.x, y:p.y - lift, dx:dx, dy:dy, nx:-dy, ny:dx, t:t};
 }
 
+/* 坡道中心线进入甲板轮廓的那个 t（坡道与二层的真实接缝）。
+   坡道的槽底 / 槽壁 / 侧轨**一律画到这里为止**：再往前就属于甲板顶面，
+   由甲板的轮廓线接管。这样两边是同一条边界，不会各画一条然后对不上。 */
+let rampCrossCache = null;
+function rampDeckCross(){
+  if (rampCrossCache) return rampCrossCache;
+  const p = DECK2.poly;
+  const inside = function(x, y){
+    let r = false;
+    for (let i = 0, j = p.length - 1; i < p.length; j = i++){
+      const xi = p[i].x, yi = p[i].y, xj = p[j].x, yj = p[j].y;
+      if (((yi > y) !== (yj > y)) &&
+          (x < (xj - xi) * (y - yi) / ((yj - yi) || 1e-6) + xi)) r = !r;
+    }
+    return r;
+  };
+  let tC = 1;
+  for (let k = 0; k <= 200; k++){
+    const t = k / 200, q = rampPoint(t);
+    if (inside(q.x, q.y)){ tC = Math.max(0.55, t - 0.004); break; }
+  }
+  const q = rampPoint(tC);
+  rampCrossCache = {t: tC, x: q.x, y: q.y, w: rampHalfW(tC)};
+  return rampCrossCache;
+}
+
 /* 坡道半宽：入口最宽（约为旧桥面 2 倍），向二层端线性收窄成漏斗，U 型一气呵成。 */
-function rampHalfW(t){ const e = t*t*(3-2*t); return 22 - 14*e; }   // 入口半宽22→二层8，smoothstep 平滑收窄
+/* 坡道半宽：入口 22 → 接缝 16。
+   原来收到 8（宽度砍掉 64%），最后一段细成一根针，接到甲板上就显得"割裂"。
+   现在只收 6 —— 坡道保持饱满，与甲板边缘等宽对接。 */
+function rampHalfW(t){ const e = t*t*(3-2*t); return 22 - 6*e; }
 
 /* 沿坡道左右法向构造变宽带状多边形（含架空 lift），用于填充/裁剪。 */
-function rampRibbon(wfn){
+function rampRibbon(wfn, t1){
+  t1 = (t1 === undefined || t1 > 1) ? 1 : t1;
   const N = 80, L = [], R = [];
   for (let k = 0; k <= N; k++){
-    const t = k / N, f = rampFrame(t), w = wfn(t);
+    const t = t1 * k / N, f = rampFrame(t), w = wfn(t);
     L.push([f.x + f.nx * w, f.y + f.ny * w]);
     R.push([f.x - f.nx * w, f.y - f.ny * w]);
   }
@@ -5945,15 +5975,16 @@ function drawLift(){
   // —— ②c 与二层顶面的融合围裙：桥尾段铺一块甲板材质的宽板盖住圆顶肩线，
   //    桥面→围裙→二层顶面同材质过渡，消掉"桥搭在板上"的接缝感（垫在槽底/导轨之下） ——
   ctx.save();
-  const A0 = 0.70, AN = 24;
+  const RC2c = rampDeckCross();
+  const A0 = Math.min(0.70, RC2c.t - 0.04), AN = 24;
   ctx.beginPath();
   for (let k = 0; k <= AN; k++){
-    const t = A0 + (1 - A0) * k / AN, f = rampFrame(t), w = rampHalfW(t) + 6;
+    const t = A0 + (RC2c.t - A0) * k / AN, f = rampFrame(t), w = rampHalfW(t) + 6;
     const x = f.x + f.nx * w, y = f.y + f.ny * w;
     if (k === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
   }
   for (let k = AN; k >= 0; k--){
-    const t = A0 + (1 - A0) * k / AN, f = rampFrame(t), w = rampHalfW(t) + 6;
+    const t = A0 + (RC2c.t - A0) * k / AN, f = rampFrame(t), w = rampHalfW(t) + 6;
     ctx.lineTo(f.x - f.nx * w, f.y - f.ny * w);
   }
   ctx.closePath();
@@ -5963,20 +5994,24 @@ function drawLift(){
   ctx.strokeStyle = 'rgba(150,185,245,.25)'; ctx.lineWidth = 1; ctx.stroke();
   ctx.restore();
 
-  // —— ③ 半透明滑道槽：球在槽内可见，保留架空通透感（加深以读作实体槽底） ——
-  rampRibbon(function(t){ return rampHalfW(t); });
+  // —— ③ 半透明滑道槽：画到与甲板的接缝为止（之后归甲板顶面） ——
+  const RC3 = rampDeckCross();
+  rampRibbon(function(t){ return rampHalfW(t); }, RC3.t);
   ctx.fillStyle = 'rgba(12,20,40,.62)'; ctx.fill();
-  // 槽底中缝：一条暗沟，强化"U 型槽"而非平面彩带
+  /* 槽底中缝：一条暗沟，强化"U 型槽"而非平面彩带。
+     必须和槽底一样截在接缝 t —— 否则槽底断了、这条中缝还在往前伸，
+     就在甲板上留一条孤立黑线（看起来像把坡道拉长了一截）。 */
+  const NT_M = Math.max(8, Math.round(60 * RC3.t));
   ctx.beginPath();
-  for (let k = 0; k <= 60; k++){
-    const t = k / 60, f = rampFrame(t);
+  for (let k = 0; k <= NT_M; k++){
+    const t = RC3.t * k / NT_M, f = rampFrame(t);
     if (k === 0) ctx.moveTo(f.x, f.y); else ctx.lineTo(f.x, f.y);
   }
   ctx.strokeStyle = 'rgba(4,8,18,.7)'; ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.stroke();
   ctx.strokeStyle = 'rgba(120,160,220,.25)'; ctx.lineWidth = 1;
   ctx.beginPath();
-  for (let k = 0; k <= 60; k++){
-    const t = k / 60, f = rampFrame(t);
+  for (let k = 0; k <= NT_M; k++){
+    const t = RC3.t * k / NT_M, f = rampFrame(t);
     if (k === 0) ctx.moveTo(f.x, f.y - 1.2); else ctx.lineTo(f.x, f.y - 1.2);
   }
   ctx.stroke();
@@ -5986,24 +6021,30 @@ function drawLift(){
   /* 末段收束：槽壁与钢丝在接近二层时高度归零、贴回顶面。
      原版坡道不是"开个洞插进去"，而是槽体逐渐摊平并入上层台面；
      直接画到末端会留下一圈生硬的截断面（放大看很像两件东西拼在一起）。 */
+  /* 槽壁收口以**接缝 t** 为界：最后 10% 内平滑归零，正好在甲板边缘收平。
+     原来固定 0.84 起收窄，收窄段落在甲板外面 → 坡道自己先细成一个尖，
+     然后甲板轮廓又是另一条线，两条线中间一段空白，就是"割裂"的来源。 */
+  const RC4 = rampDeckCross();
   const jFade = function (t){
-    if (t < 0.84) return 1;
-    const k = Math.min(1, (t - 0.84) / 0.16);
+    const a = Math.max(0.55, RC4.t - 0.10);
+    if (t < a) return 1;
+    const k = Math.min(1, (t - a) / Math.max(0.02, RC4.t - a));
     return 1 - k * k * (3 - 2 * k);
   };
+  const NT = Math.max(8, Math.round(60 * RC4.t));
   const RAIL_H = 6;
   for (const side of [-1, 1]){
     const floor = [], rail = [];
-    for (let k = 0; k <= 60; k++){
-      const t = k / 60, f = rampFrame(t), off = (rampHalfW(t) - 1) * side;
+    for (let k = 0; k <= NT; k++){
+      const t = RC4.t * k / NT, f = rampFrame(t), off = (rampHalfW(t) - 1) * side;
       const x = f.x + f.nx * off, y = f.y + f.ny * off;
       floor.push([x, y]); rail.push([x, y - RAIL_H * jFade(t)]);
     }
     // 槽侧壁：floor 边 → rail 边的竖直四边形带
     ctx.beginPath();
     ctx.moveTo(floor[0][0], floor[0][1]);
-    for (let k = 1; k <= 60; k++) ctx.lineTo(floor[k][0], floor[k][1]);
-    for (let k = 60; k >= 0; k--) ctx.lineTo(rail[k][0], rail[k][1]);
+    for (let k = 1; k <= NT; k++) ctx.lineTo(floor[k][0], floor[k][1]);
+    for (let k = NT; k >= 0; k--) ctx.lineTo(rail[k][0], rail[k][1]);
     ctx.closePath();
     const wg = ctx.createLinearGradient(0, rampFrame(0.5).y - RAIL_H, 0, rampFrame(0.5).y + 4);
     wg.addColorStop(0, 'rgba(120,150,205,.85)');
@@ -6012,15 +6053,15 @@ function drawLift(){
     ctx.fillStyle = wg; ctx.fill();
     // 顶部钢丝：暗底 + 银白 + 高光，读作圆钢丝
     ctx.beginPath();
-    for (let k = 0; k <= 60; k++){ const p = rail[k]; if (k === 0) ctx.moveTo(p[0], p[1]); else ctx.lineTo(p[0], p[1]); }
+    for (let k = 0; k <= NT; k++){ const p = rail[k]; if (k === 0) ctx.moveTo(p[0], p[1]); else ctx.lineTo(p[0], p[1]); }
     ctx.strokeStyle = 'rgba(24,34,58,.95)'; ctx.lineWidth = 3.2; ctx.lineCap = 'round'; ctx.stroke();
     ctx.strokeStyle = 'rgba(168,198,240,.95)'; ctx.lineWidth = 1.8; ctx.stroke();
     ctx.beginPath();
-    for (let k = 0; k <= 60; k++){ const p = rail[k]; if (k === 0) ctx.moveTo(p[0], p[1] - 0.8); else ctx.lineTo(p[0], p[1] - 0.8); }
+    for (let k = 0; k <= NT; k++){ const p = rail[k]; if (k === 0) ctx.moveTo(p[0], p[1] - 0.8); else ctx.lineTo(p[0], p[1] - 0.8); }
     ctx.strokeStyle = 'rgba(235,248,255,.75)'; ctx.lineWidth = 0.8; ctx.stroke();
     // 立柱：把钢丝撑在槽壁顶（间隔小柱，强化"架空"）
     ctx.strokeStyle = 'rgba(150,182,228,.6)'; ctx.lineWidth = 1.4;
-    for (let k = 4; k <= 60; k += 8){
+    for (let k = 4; k <= NT; k += 8){
       ctx.beginPath(); ctx.moveTo(floor[k][0], floor[k][1]); ctx.lineTo(rail[k][0], rail[k][1]); ctx.stroke();
     }
   }
@@ -6084,47 +6125,22 @@ function drawLift(){
   ctx.shadowBlur = 0;
   ctx.restore();
 
-  /* —— ⑧ 坡道末端接进二层：**不画封口** ——
-     之前这里画了一个圆头 + 一道横线，读作"坡道到头了、球被甩出去"。
-     现在沿切线把槽底继续延伸 34px，穿过甲板外缘（那里已经开口，见 deckEdgeStroke），
-     侧轨用 alpha 渐变淡出 —— 读作"坡道一直铺进平台，二者是同一个东西"。 */
-  const jf = rampFrame(1);
-  /* rampFrame(1) 的切线/dx,dy 是退化的 0（内部用 t+0.01 采样，t=1 时采到同一点）。
-     方向必须回退到 0.94 取，否则延伸段的宽度和位移都是 0，等于没画。 */
-  const jd = rampFrame(0.94);
-  const wEnd = rampHalfW(1);
-  const rx = -jd.dy, ry = jd.dx;                    // 法向
-  const ex2 = jf.x + jd.dx * 36, ey2 = jf.y + jd.dy * 36;
+  /* —— ⑧ 收口：坡道已经画到甲板轮廓（rampDeckCross），
+     侧轨末端正好落在甲板缺口的两个端点上，不需要再补延伸段或封口。
+     这里只补两小段"焊缝"：从侧轨末端沿甲板边缘往外 3px，
+     让坡道的亮边和甲板的外缘亮边在同一个亮度上接住。 */
+  const RC8 = rampDeckCross();
+  const f8 = rampFrame(RC8.t);
   ctx.save();
-  // 延伸段槽底：与主槽同色，保证视觉连续
-  ctx.beginPath();
-  ctx.moveTo(jf.x + rx * wEnd, jf.y + ry * wEnd);
-  ctx.lineTo(ex2 + rx * wEnd * 0.90, ey2 + ry * wEnd * 0.90);
-  ctx.lineTo(ex2 - rx * wEnd * 0.90, ey2 - ry * wEnd * 0.90);
-  ctx.lineTo(jf.x - rx * wEnd, jf.y - ry * wEnd);
-  ctx.closePath();
-  const eg = ctx.createLinearGradient(jf.x, jf.y, ex2, ey2);
-  eg.addColorStop(0, 'rgba(12,20,40,.62)');
-  eg.addColorStop(0.6, 'rgba(11,18,36,.48)');
-  eg.addColorStop(1, 'rgba(10,17,34,.16)');
-  ctx.fillStyle = eg;
-  ctx.fill();
-  // 槽底中缝继续延伸（与 ③ 那条暗沟对齐）
-  const mg = ctx.createLinearGradient(jf.x, jf.y, ex2, ey2);
-  mg.addColorStop(0, 'rgba(4,8,18,.70)');
-  mg.addColorStop(1, 'rgba(4,8,18,0)');
-  ctx.strokeStyle = mg; ctx.lineWidth = 3; ctx.lineCap = 'butt';
-  ctx.beginPath(); ctx.moveTo(jf.x, jf.y); ctx.lineTo(ex2, ey2); ctx.stroke();
-  // 两侧导轨延伸：越往前越淡，最后融进甲板顶面
+  ctx.strokeStyle = 'rgba(214,236,255,.60)';
+  ctx.lineWidth = 1.5;
+  ctx.lineCap = 'round';
   for (const s of [-1, 1]){
-    const rg2 = ctx.createLinearGradient(jf.x, jf.y, ex2, ey2);
-    rg2.addColorStop(0, 'rgba(186,214,250,.72)');
-    rg2.addColorStop(0.65, 'rgba(150,186,236,.28)');
-    rg2.addColorStop(1, 'rgba(130,170,225,0)');
-    ctx.strokeStyle = rg2; ctx.lineWidth = 1.6; ctx.lineCap = 'round';
+    const wx = f8.x + f8.nx * (RC8.w - 1) * s;
+    const wy = f8.y + f8.ny * (RC8.w - 1) * s;
     ctx.beginPath();
-    ctx.moveTo(jf.x + rx * wEnd * s, jf.y + ry * wEnd * s);
-    ctx.lineTo(ex2 + rx * wEnd * 0.90 * s, ey2 + ry * wEnd * 0.90 * s);
+    ctx.moveTo(wx, wy);
+    ctx.lineTo(wx + f8.dx * 3, wy + f8.dy * 3);
     ctx.stroke();
   }
   ctx.restore();
