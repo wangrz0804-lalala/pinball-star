@@ -980,7 +980,12 @@ const DOCK_POSTS = [
 
 /* 黑洞: 非实体引力井。关闭时只是一圈暗环；开启后球经过会被拉弯轨迹并加分，
    真正掉进去则被吞下、给一笔大额赏金再从上方抛回台面。只有完成任务才能开启。 */
-const BLACKHOLE = {x:350, y:218, r:19, ring:40, pull:0, pop:0};   // 右上小件：环缩小，不再与中央环抢尺度
+/* 引力源**只有一个**：中央军衔环里的引力井（原 RING 圆心 240,470）。
+   原先右上角另有一个 BLACKHOLE(350,218)，两个引力点除了分散注意力没有好处——
+   现在把引力整体并入引力井：坐标对齐井心，作用半径放大到覆盖整个圆盘。
+   BLACKHOLE 这个名字保留（它是引力场那套状态/奖励的载体），但视觉不再单独绘制，
+   引力环画在引力井周围（见 drawBlackHole）。 */
+const BLACKHOLE = {x:240, y:470, r:16, ring:118, pull:0, pop:0};   // = RING 圆心 = WELL 位置
 
 /* 二层升降井（一层 → 二层的单独入口）：左墙一部升降梯。
    左侧快速上行的球（左挡板沿左墙的高打）被井口接住送上甲板左翼；
@@ -1925,14 +1930,16 @@ function blackHolePull(b, dt){
   const sp = Math.sqrt(b.vx*b.vx + b.vy*b.vy);
 
   // dead centre: swallowed, jackpot, thrown back out
-  if (d < BLACKHOLE.r + b.r && sp < 980){
+  /* 吞噬半径与速度上限都放大：原来 r=19、上限 980，
+     球经常"擦着中心飞过去"什么也没发生。现在半径 16+9=25、上限 1150。 */
+  if (d < BLACKHOLE.r + b.r + 6 && sp < 1150){
     b.bhT = 0.55;
     b.hidden = true;
     b.vx = 0; b.vy = 0;
     b.trail.length = 0;
     const pts = hyper ? 60000 : 30000;
     addScore(pts, BLACKHOLE.x, BLACKHOLE.y + 26, '#c9b6ff');
-    state.banner = {t:1.5, text:'黑洞吞噬', sub:'+' + pts + ' · 奇点弹射'};
+    state.banner = {t:1.5, text:'引力井吞没', sub:'+' + pts + ' · 井心弹射'};
     state.flash = 0.85;
     state.shake = 11;
     sfx.star();
@@ -1940,12 +1947,14 @@ function blackHolePull(b, dt){
     return;
   }
 
-  // fly-by: bend the velocity toward the singularity, and pay for the privilege
+  /* 掠过：把速度朝引力中心弯折。
+     原系数 0.10 + 0.34 太弱（远处几乎不弯），玩家看不出"有引力"。
+     现在 0.42 + 0.52：圆盘外缘也能明显带弯，靠近中心时几乎直接吸过去。 */
   if (sp < 70) return;
   const want = Math.atan2(-dy, -dx);
   const cur  = Math.atan2(b.vy, b.vx);
   let diff = ((want - cur + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
-  const k = 0.10 + 0.34 * (1 - d / ring);
+  const k = 0.42 + 0.52 * (1 - d / ring);
   const na = cur + diff * k;
   b.vx = Math.cos(na) * sp;
   b.vy = Math.sin(na) * sp;
@@ -2106,7 +2115,7 @@ function guideNow(){
   }
 
   if (state.bhOpen > 0){
-    return {text:'黑洞在线 ' + Math.ceil(state.bhOpen) + 's', sub:'送球进右上黑洞', spot:'w0', c:'#c9b6ff'};
+    return {text:'引力井强化 ' + Math.ceil(state.bhOpen) + 's', sub:'中央圆盘 · 送球进井心', spot:'well', c:'#c9b6ff'};
   }
 
   return {text:'打亮任务靶 选任务', sub:'击打顶部弧线的三个任务靶', spot:'mt0', c:'rgba(140,175,235,.85)'};
@@ -2542,14 +2551,19 @@ function stepTopModules(b, dt){
    出口是前缘中央的洞，导流墙保证球最终会汇向洞口落回一层。 */
 /* 出口直落（无地下隧道）：球从二层中央洞口漏下一层，位置就在洞口正下方，
    给一个朝场地内的下落速度，保留一点高度下落动画——对应原版二层出口直接落台面。 */
+/* 二层出口 → 一层。
+   旧实现是"从洞正下方垂直落下 + 横向 ±60"，而洞口 (76~104, 598) 的**正下方
+   就是左弹射器**（81~131, 606~633，只隔 8px）——球每次都被弹射器弹飞，
+   路径固定，玩家感觉"没有随机性"。
+   改成从隧道**甩出去**：给一个朝场地中央的初速（280~480），球越过弹射器后
+   走一条抛物线落到场地中部。落点随初速散开，每次都不同。 */
 function dropFromDeck(b){
   b.deck = 'lower';
   b.hidden = false;
-  // 洞口正下方出场，带向下的落速；稍带横向随机让它落进场地而非垂直砸同一个点
-  b.x = DECK2.cx + (Math.random() - 0.5) * 10;
-  b.y = DECK2.hole.y + 6;
-  b.vx = (Math.random() - 0.5) * 120;
-  b.vy = 260 + Math.random() * 60;
+  b.x = DECK2.cx + (Math.random() - 0.5) * 16;
+  b.y = DECK2.hole.y + 4;
+  b.vx = 300 + Math.random() * 250;          // 朝场地中央甩出（落点 x≈190~340）
+  b.vy = -70 + Math.random() * 130;          // 略上抛～平抛，落点 y 也跟着变
   b.dropAnim = 0.18;                 // 下落高度动画：从二层高度落到一层
   b.trail.length = 0; b.stuck = 0; b.tries = 0; b.dkT = 0; b.dkN = 0;
   b.wellImm = 1.0;                   // 出场点紧邻军衔环，短暂免疫井口避免刚落就被吞
@@ -2726,7 +2740,7 @@ function stepBall(b, dt){
       b.trail.length = 0; b.stuck = 0; b.tries = 0;
       b.zg = {x:b.x, y:b.y, t:0, n:0}; b.hiT = 0;
       burst(BLACKHOLE.x, BLACKHOLE.y, '#b79cff', 26, 340);
-      popText(BLACKHOLE.x, BLACKHOLE.y - 40, '奇点弹射', '#c9b6ff');
+      popText(BLACKHOLE.x, BLACKHOLE.y - 40, '井心弹射', '#c9b6ff');
       sfx.star();
       state.shake = 7;
     }
@@ -3290,7 +3304,7 @@ function update(dt){
   if (state.vukCd > 0) state.vukCd = Math.max(0, state.vukCd - dt);
   if (state.bhOpen > 0){
     state.bhOpen = Math.max(0, state.bhOpen - dt);
-    if (state.bhOpen === 0) state.banner = {t:1.4, text:'黑洞闭合', sub:'完成任务可再次开启'};
+    if (state.bhOpen === 0) state.banner = {t:1.4, text:'引力井恢复', sub:'完成任务可再次强化'};
   }
   DOCK.pop *= Math.pow(0.02, dt);
   DOCK.spin *= Math.pow(0.05, dt);
@@ -3910,7 +3924,7 @@ function drawBackglass(){
     tinyText('★ ' + rw.zh + ' ' + Math.ceil(rw.tLeft) + 's', W - 24, 122, 9, C.gold, 'right', '0.6px');
     ctx.globalAlpha = 1;
   } else if (state.bhOpen > 0){
-    tinyText('黑洞 ' + Math.ceil(state.bhOpen) + 's', W - 24, 122, 8, '#c9b6ff', 'right', '0.6px');
+    tinyText('引力井 ' + Math.ceil(state.bhOpen) + 's', W - 24, 122, 8, '#c9b6ff', 'right', '0.6px');
   }
   ctx.restore();
 }
@@ -4064,121 +4078,88 @@ function drawDock(){
    原版这块不是"一个紫圈"，而是一团**旋涡状星云**：亮核 + 多层尘带 + 外围辉光。
    我们保留自己的深蓝霓虹语言，但把结构做成星云：三层径向辉光打底，
    再叠两条倾斜的椭圆尘带（随 time 缓慢旋进），最后压一个吸积盘 + 亮核。 */
+/* 引力场可视化：画在**引力井周围**（井心 = RING 圆心）。
+   原来这里画的是右上角那团星云螺旋，现在黑洞并入引力井，这里改成"引力场"——
+   几圈从外向里收缩的虚线环，直接读出"这里有个引力源"。
+   bhOpen > 0（完成任务后强化）时：环更多、更亮、收得更快、径向更长。 */
 function drawBlackHole(){
   const h = BLACKHOLE;
   const open = state.bhOpen > 0;
   const hyper = !!(state.reward && state.reward.id === 'hyperhole');
   const t = state.time;
-  const pul = 0.5 + 0.5 * Math.sin(t * (open ? 3.4 : 1.3));
-  const R = h.ring * (hyper ? 1.45 : 1) * (open ? 1.08 : 0.92);
+  /* 视觉半径收在**盘面内**（RING.rad=80 + 8）：环要绕着圆盘转，
+     跑到圆盘外面就变成"围着整个下场的圈"，读不出"圆盘中心是引力源"。
+     物理作用半径仍是 h.ring=118，比视觉大 —— 视觉给暗示，物理给手感。 */
+  const R = (RING.rad + 8) * (hyper ? 1.14 : 1) * (open ? 1 : 0.92);
+  /* 未激活也要看得见引力场（0.34 太弱，玩家根本不知道这里有引力源）。 */
+  const pull = open ? 1 : 0.62;
   ctx.save();
 
-  // ① 外围辉光：三层叠色（洋红 → 紫 → 深蓝），关闭时整体压暗
-  const kg = open ? 1 : 0.70;
-  const g0 = ctx.createRadialGradient(h.x, h.y, 2, h.x, h.y, R);
-  g0.addColorStop(0,    'rgba(255,214,244,' + (0.46 * kg) + ')');
-  g0.addColorStop(0.16, 'rgba(236,132,222,' + (0.40 * kg) + ')');
-  g0.addColorStop(0.42, 'rgba(146,86,214,' + (0.28 * kg) + ')');
-  g0.addColorStop(0.72, 'rgba(74,64,178,' + (0.17 * kg) + ')');
+  /* ① 场：三层极淡的径向辉光，把圆盘中心压成一个"深井" */
+  const g0 = ctx.createRadialGradient(h.x, h.y, 6, h.x, h.y, R);
+  g0.addColorStop(0,    'rgba(255,150,90,' + (0.26 * pull) + ')');
+  g0.addColorStop(0.32, 'rgba(126,72,196,' + (0.18 * pull) + ')');
+  g0.addColorStop(0.72, 'rgba(58,52,150,' + (0.12 * pull) + ')');
   g0.addColorStop(1,    'rgba(12,10,40,0)');
   ctx.fillStyle = g0;
   ctx.beginPath(); ctx.arc(h.x, h.y, R, 0, 6.2832); ctx.fill();
 
-  /* ② 螺旋臂：原版那团星云是旋涡，不是几条闭合椭圆环
-     （闭合环会读成"土星"）。这里用 3 条对数螺旋：半径由内向外递增，
-     角度同时累积，压扁成盘面 → 真正的旋涡形态。 */
-  for (let arm = 0; arm < 3; arm++){
-    const base = arm * 2.0944 + t * 0.30 * (arm % 2 ? -1 : 1);
+  /* ①b 中心漏斗：井口外一圈由深到浅的凹陷，读作"盘心是个漏斗"。
+     没有这一层，圆盘中心只是一个平面暗盘，看不出引力。 */
+  const fun = ctx.createRadialGradient(h.x, h.y, 8, h.x, h.y, RING.rad * 0.60);
+  fun.addColorStop(0,    'rgba(0,0,0,' + (0.55 * pull) + ')');
+  fun.addColorStop(0.42, 'rgba(6,8,20,' + (0.40 * pull) + ')');
+  fun.addColorStop(0.78, 'rgba(20,18,52,' + (0.20 * pull) + ')');
+  fun.addColorStop(1,    'rgba(0,0,0,0)');
+  ctx.fillStyle = fun;
+  ctx.beginPath(); ctx.arc(h.x, h.y, RING.rad * 0.60, 0, 6.2832); ctx.fill();
+
+  /* ② 收缩环：4 圈虚线，半径随时间向内收（读作"被吸进去"） */
+  const N = open ? 5 : 4;
+  for (let i = 0; i < N; i++){
+    const ph = ((t * (open ? 0.52 : 0.30) + i / N) % 1);
+    const rr = R * (1 - ph * 0.62);
+    const fade = 1 - Math.abs(ph - 0.5) * 1.6;      // 中段最亮，两端淡出
     ctx.beginPath();
-    for (let k = 0; k <= 12; k++){
-      const u = k / 12;
-      const rr2 = R * (0.16 + u * 0.84);
-      const aa = base + u * 2.35;
-      const px = h.x + Math.cos(aa) * rr2;
-      const py = h.y + Math.sin(aa) * rr2 * 0.74;
-      if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-    }
-    ctx.strokeStyle = open
-      ? 'rgba(255,206,246,' + (0.62 + 0.20 * pul - arm * 0.10) + ')'
-      : 'rgba(176,158,240,' + (0.58 - arm * 0.10) + ')';
-    ctx.lineWidth = open ? 3.6 - arm * 0.7 : 2.6 - arm * 0.5;
-    ctx.lineCap = 'round';
+    ctx.arc(h.x, h.y, rr, 0, 6.2832);
+    ctx.setLineDash([rr * 0.10, rr * 0.075]);
+    ctx.lineDashOffset = -t * 26;
+    ctx.strokeStyle = 'rgba(255,170,120,' + (Math.max(0, fade) * (open ? 0.46 : 0.32)) + ')';
+    ctx.lineWidth = open ? 1.7 : 1.3;
     ctx.stroke();
-    /* 螺旋臂上的两处亮斑：星云的"电离结点"，让臂不是一条均匀细线 */
-    for (let s2 = 0; s2 < 2; s2++){
-      const uu = 0.42 + s2 * 0.34;
-      const rr3 = R * (0.16 + uu * 0.84);
-      const aa2 = base + uu * 2.35;
-      const bx2 = h.x + Math.cos(aa2) * rr3;
-      const by2 = h.y + Math.sin(aa2) * rr3 * 0.74;
+    ctx.setLineDash([]);
+  }
+
+  /* ③ 强化时加一圈实线外环：明确"引力已开启" */
+  if (open){
+    const pul = 0.5 + 0.5 * Math.sin(t * 3.4);
+    ctx.beginPath(); ctx.arc(h.x, h.y, R * 0.98, 0, 6.2832);
+    ctx.strokeStyle = 'rgba(255,170,110,' + (0.26 + 0.24 * pul) + ')';
+    ctx.lineWidth = 1.8;
+    ctx.shadowColor = 'rgba(255,150,90,.75)';
+    ctx.shadowBlur = 16;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+  }
+
+  /* ④ 被拉弯的星尘：几个小点沿螺线向中心飘（强化时才有） */
+  {
+    for (let i = 0; i < (open ? 7 : 4); i++){
+      const ph = ((t * (open ? 0.42 : 0.26) + i / 7) % 1);
+      const rr = R * (1 - ph * 0.9);
+      const aa = i * 2.4 + ph * 3.4;
       ctx.beginPath();
-      ctx.arc(bx2, by2, open ? 2.2 : 1.5, 0, 6.2832);
-      ctx.fillStyle = open
-        ? 'rgba(255,232,252,' + (0.55 + 0.3 * pul) + ')'
-        : 'rgba(190,172,244,.5)';
+      ctx.arc(h.x + Math.cos(aa) * rr, h.y + Math.sin(aa) * rr * 0.96, 1.3, 0, 6.2832);
+      ctx.fillStyle = 'rgba(255,220,190,' + ((open ? 0.5 : 0.28) * (1 - ph)) + ')';
       ctx.fill();
     }
   }
 
-  // ③ 吸积盘边缘：一圈细亮环，只在开启时出现
-  if (open){
-    ctx.beginPath(); ctx.arc(h.x, h.y, h.r + 3.5, 0, 6.2832);
-    ctx.strokeStyle = 'rgba(255,214,246,' + (0.42 + 0.34 * pul) + ')';
-    ctx.lineWidth = 1.6;
-    ctx.shadowColor = '#ffb6ec';
-    ctx.shadowBlur = 14 + h.pop * 22;
-    ctx.stroke();
-    ctx.shadowBlur = 0;
-  }
-
-  // ④ 视界：纯黑圆 + 内侧一圈冷蓝反光（黑洞边缘的引力透镜感）
-  ctx.beginPath(); ctx.arc(h.x, h.y, h.r, 0, 6.2832);
-  ctx.fillStyle = '#000';
-  ctx.fill();
-  const rim = ctx.createRadialGradient(h.x, h.y, h.r * 0.55, h.x, h.y, h.r);
-  rim.addColorStop(0, 'rgba(0,0,0,0)');
-  rim.addColorStop(0.72, 'rgba(48,34,104,' + (open ? 0.62 : 0.42) + ')');
-  rim.addColorStop(1, 'rgba(158,128,238,' + (open ? 0.82 : 0.58) + ')');
-  ctx.fillStyle = rim;
-  ctx.beginPath(); ctx.arc(h.x, h.y, h.r, 0, 6.2832); ctx.fill();
-  if (!open){
-    ctx.setLineDash([3, 4]);
-    ctx.strokeStyle = 'rgba(146,126,206,.45)';
-    ctx.lineWidth = 1.3;
-    ctx.beginPath(); ctx.arc(h.x, h.y, h.r, 0, 6.2832); ctx.stroke();
-    ctx.setLineDash([]);
-  }
-
-  // ⑤ 亮核：开启时中心一小点白光（被吸进去的物质在发光）
-  if (open){
-    ctx.globalAlpha = 0.5 + 0.4 * pul;
-    ctx.fillStyle = '#fff2fb';
-    ctx.shadowColor = '#ffd6f4';
-    ctx.shadowBlur = 16;
-    ctx.beginPath(); ctx.arc(h.x - h.r * 0.18, h.y - h.r * 0.22, 2.1, 0, 6.2832); ctx.fill();
-    ctx.shadowBlur = 0;
-    ctx.globalAlpha = 1;
-  }
-
-  // ⑥ 周围固定星点（原版星云里有一圈碎星）
-  const stars = [[-1.5,-1.2,.9],[-1.9,.3,.7],[1.6,-1.4,.8],[2.0,.6,.6],[.4,-2.1,.7],[-.6,1.9,.6],[1.2,1.7,.5]];
-  ctx.fillStyle = open ? 'rgba(255,225,250,.55)' : 'rgba(170,160,230,.30)';
-  for (let i = 0; i < stars.length; i++){
-    const s = stars[i];
-    ctx.beginPath();
-    ctx.arc(h.x + s[0] * h.r * 0.9, h.y + s[1] * h.r * 0.9, s[2], 0, 6.2832);
-    ctx.fill();
-  }
-
-  ctx.globalAlpha = open ? 0.95 : 0.42;
-  tinyText(open ? '黑洞 ' + Math.ceil(state.bhOpen) + 's' : '黑洞 关闭',
-           h.x, h.y + R * 0.78, 7,
-           open ? '#c9b6ff' : 'rgba(150,140,200,.62)', 'center', '1px');
-  ctx.globalAlpha = 1;
+  /* 说明文字不画在盘面上：会跟军衔环的 0/4 和圆盘刻度叠在一起。
+     状态在 HUD 第四行已经有一处（引力井 xx s），这里不再重复。 */
   ctx.restore();
 }
 
-/* ---------------------------- 总体任务灯 ---------------------------- */
 function drawMissionLamps(){
   const first = MISSION_LAMPS[0], last = MISSION_LAMPS[LAMP_N - 1];
   ctx.save();
