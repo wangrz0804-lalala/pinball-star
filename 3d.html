@@ -848,33 +848,44 @@ const LANE_LAMPS = [-0.95, -1.86, -2.46].map(function(a){
 // scoring posts (ordinary, always lit)
 const POSTS = [
   {x:78,  y:438, r:10, c:C.violet, pop:0, pts:150},
-  {x:402, y:438, r:10, c:C.violet, pop:0, pts:150}
-];   // 镜像规范：x_left + x_right = 480、y 相同
+  /* 右翼柱下移：原来在 y=438，正好被落靶衬板占住那段墙。
+     挪到衬板下方（y=558），既让出衬板位置，也仍然守在上弹射器前方。 */
+  {x:400, y:558, r:10, c:C.violet, pop:0, pts:150}
+];
 
 /* ============================ 原版补全区 ============================ */
 /* ① 落靶 (Drop Targets)：3 枚竖排在右墙内侧。立着时是实体，撞上即被击落；
    3 枚全落给一笔奖励并复位。原版台面右侧有一组同款，是"看得见的进度条"。 */
-/* ============================ 落靶翼板 (target wing) ============================
-   原版结构：从**发射区旁边长出一块立体的三角形**——红边勾勒的楔形，橙色受光侧壁 +
-   灰色顶面，三角形的外缘上嵌着可被击落的靶。球撞到边缘的靶就把它打落，
-   靶落光后楔形边缘留一排空槽，过一会儿重新立起。
-   坐标：内缘贴发射道内墙 x=410，外尖伸到 (350,600)，正好在右弹射器上方让开。 */
+/* ============================ 落靶衬板 (target bank) ============================
+   原版结构：沿**发射道内墙**一段一段的衬板——每段向场地凸出二十几像素，
+   段与段之间留缝，段的外缘上压着可被击落的靶条。
+   关键是**凸出很浅**：原版这块只占内墙外侧一条窄带，球从它外侧正常滚过；
+   做成一大块伸进场地的三角形会直接把右侧走廊堵死（上一版就是这么错的）。
+
+   我们这里三段宽度递减（26 → 22 → 18），整体轮廓收窄成楔形，
+   读作"从发射区旁边长出来的三角结构"，但占地始终只有 20 多像素。 */
 const DROP_BANK = {
-  /* 内缘必须落在 x=402——发射道内墙中线在 412、墙宽 22（覆盖 401~423），
-     内缘放 410 会被墙体整块盖住，三角形就退化成一条橙线。 */
-  A: {x: 402, y: 468},      // 内上顶点
-  B: {x: 402, y: 604},      // 内下顶点
-  C: {x: 352, y: 592},      // 外尖
-  t0: 0.30, t1: 0.55, t2: 0.80,   // 三枚靶沿斜边 A→C 的位置
+  WX: 402,                          // 内缘：贴发射道内墙外侧
+  T0: {x: 402, y: 366},             // 内上角
+  T1: {x: 372, y: 460},             // 外尖：朝场地的顶点，凸出 30px
+  T2: {x: 402, y: 554},             // 内下角
   down: [false, false, false], pop: [0, 0, 0], cd: 0, resetT: 0
 };
-/* 靶心 = 斜边 A→C 上的插值点 */
-DROP_BANK.t = [DROP_BANK.t0, DROP_BANK.t1, DROP_BANK.t2].map(function(u){
-  return {
-    x: DROP_BANK.A.x + (DROP_BANK.C.x - DROP_BANK.A.x) * u,
-    y: DROP_BANK.A.y + (DROP_BANK.C.y - DROP_BANK.A.y) * u
+/* 三枚靶：上斜边两枚、下斜边一枚，围着外尖分布。
+   每个靶心 = 斜边插值点沿外法向推 4px，正好骑在棱上。 */
+DROP_BANK.t = (function(){
+  const out = [];
+  const along = function(P, Q, u){
+    const dx = Q.x - P.x, dy = Q.y - P.y;
+    const L = Math.hypot(dx, dy) || 1;
+    const nx = -dy / L, ny = dx / L;        // 外法向（朝场地）
+    return {x: P.x + dx * u + nx * 2, y: P.y + dy * u + ny * 2};
   };
-});
+  out.push(along(DROP_BANK.T0, DROP_BANK.T1, 0.56));
+  out.push(along(DROP_BANK.T1, DROP_BANK.T2, 0.30));
+  out.push(along(DROP_BANK.T1, DROP_BANK.T2, 0.74));
+  return out;
+})();
 
 /* ② 危险带 (Hazard Banks)：两侧挡板入口处各 3 盏，球滚过即点亮（纯传感器）。
    单侧 3 盏全亮 → 中央挡柱升起 6 秒 + 奖励，然后清空重来。 */
@@ -1124,7 +1135,7 @@ spot('posts', 240, 474, '两侧翼柱');
 /* 补全区的引导点：引导箭头与任务标记都从这里取坐标 */
 spot('lramp', RAMP.x, RAMP.y, '左发射坡道');
 spot('hyper', HYPER.x, HYPER.y + 16, '超空间顶点');
-spot('drop',  DROP_BANK.t[1].x + 6, DROP_BANK.t[1].y + 22, '落靶翼板');
+spot('drop',  DROP_BANK.t[1].x + 2, DROP_BANK.t[1].y + 26, '落靶衬板');
 spot('hzL', HAZARDS[0].x[1], HAZARDS[0].y[1] - 20, '左危险带');
 spot('hzR', HAZARDS[1].x[1], HAZARDS[1].y[1] - 20, '右危险带');
 spot('mt0', MISSION_TARGETS[0].x, MISSION_TARGETS[0].y, '任务靶');
@@ -2003,7 +2014,7 @@ function hitDropTarget(i){
   if (n >= 3){
     DROP_BANK.resetT = 1.8;
     const bonus = 25000 + state.rank * 8000;
-    addScore(bonus, DROP_BANK.t[1].x, DROP_BANK.t[1].y - 30, C.gold);
+    addScore(bonus, DROP_BANK.t[1].x - 16, DROP_BANK.t[1].y - 24, C.gold);
     state.banner = {t:1.9, text:'落靶全清', sub:'+' + bonus + ' · 靶架即将复位'};
     state.flash = 0.9; state.shake = 9;
     sfx.rank();
@@ -2890,9 +2901,9 @@ function stepBall(b, dt){
       }
     }
     /* ---- 原版补全区 ---- */
-    /* 落靶：翼板外缘上的三枚立靶。用圆形碰撞而不是横条——
-       楔形斜边上的方板若用线段碰撞，球会沿斜面被"刮"进死角；
-       圆靶让球擦过即弹开，落点更自然。 */
+    /* 落靶：三段衬板外缘上的靶条。
+       只有靶有碰撞、衬板本体不碰撞——衬板凸出才 20 多像素，
+       给本体加墙会把右侧走廊挤成一条缝；靶是球"该打的东西"，撞了就该弹开。 */
     for (let i = 0; i < DROP_BANK.t.length; i++){
       if (DROP_BANK.down[i]) continue;
       const dtg = DROP_BANK.t[i];
@@ -4848,175 +4859,133 @@ function drawSpotNamesRaw(){
 }
 
 /* ---- 原版补全区：落靶 / 危险带 / 中央挡柱 / 超空间 ---- */
-/* 落靶翼板：原版那块"从发射区旁边长出来的立体三角形"。
-   三段梯形拼接（原版就是这样分段的）：每段 = 灰色顶面 + 橙色受光斜面 + 红边，
-   段间留缝；三枚落靶嵌在三角形外缘的斜棱上，被击落后外缘留一排空槽。 */
+/* 落靶衬板：原版那种"从发射区旁长出来的楔形结构"，用这台机器的霓虹语言画。
+   形状是**尖角朝场地的三角形**（内缘贴发射道内墙，顶点凸出 30px），
+   两条斜边上各压一条荧光绿靶条。不用原版的橙色木纹和红边——那是木质台面材质。
+   —— 顶点只凸 30px：再大就把右侧走廊堵死（上一版做成等边三角就是这么错的）。 */
 function drawDropBank(){
-  const A = DROP_BANK.A, B = DROP_BANK.B, C = DROP_BANK.C;
-
-  /* 斜边 A→C 的单位方向与外法向。
-     注意：法向必须朝**三角外侧**（朝台面），写成朝内会把侧壁画进三角形里面、
-     把顶面整块盖掉——那样只剩一条橙线，看着就是"贴纸"。 */
-  const dx = C.x - A.x, dy = C.y - A.y;
-  const dl = Math.hypot(dx, dy) || 1;
-  const ux = dx / dl, uy = dy / dl;         // 沿斜边
-  /* 斜边法向，取向**朝台面**（朝左上）那一侧：橙色受光斜面本来就凸出在灰顶面之外，
-     这是这块楔形"立体"的来源。取反会把它画进三角内部，被裁剪吃光。 */
-  const nx = -uy, ny = ux;
-  /* 受光斜面的宽：原版这块**橙色斜面占大部分**、灰色顶面只是靠内侧的一条窄边。
-     取 24 让橙面撑起整个三角形，灰条收成 20px 左右——反过来就成了一块灰贴纸。 */
-  const WALL = 24;
+  const B = DROP_BANK;
+  const P0 = B.T0, P1 = B.T1, P2 = B.T2;
 
   ctx.save();
   ctx.lineJoin = 'round';
 
-  /* ---------- ① 投影 ---------- */
+  /* ① 投影：三角在墙面上投下的一片暗影 */
   ctx.beginPath();
-  ctx.moveTo(A.x + 8, A.y + 14);
-  ctx.lineTo(B.x + 8, B.y + 14);
-  ctx.lineTo(C.x + 10, C.y + 16);
+  ctx.moveTo(P0.x + 4, P0.y + 8);
+  ctx.lineTo(P1.x + 6, P1.y + 10);
+  ctx.lineTo(P2.x + 4, P2.y + 8);
   ctx.closePath();
   ctx.fillStyle = 'rgba(0,0,0,.32)';
   ctx.fill();
 
-  /* ---------- ② 主体三角：深灰金属顶面（比台面亮一档，才读得出是个"面"） ---------- */
-  const topG = ctx.createLinearGradient(A.x, A.y, C.x, B.y);
-  topG.addColorStop(0,   'rgba(92,104,136,.99)');
-  topG.addColorStop(0.38,'rgba(66,78,108,.99)');
-  topG.addColorStop(0.74,'rgba(46,56,80,.99)');
-  topG.addColorStop(1,   'rgba(32,40,60,.99)');
+  /* ② 顶面：内缘亮、尖角暗——凸起的板朝上受光多，靠近尖角处是侧壁阴影 */
+  const topG = ctx.createLinearGradient(B.WX, 0, P1.x, 0);
+  topG.addColorStop(0,    'rgba(92,112,154,.99)');
+  topG.addColorStop(0.50, 'rgba(66,84,124,.99)');
+  topG.addColorStop(1,    'rgba(40,52,84,.99)');
   ctx.beginPath();
-  ctx.moveTo(A.x, A.y);
-  ctx.lineTo(C.x, C.y);
-  ctx.lineTo(B.x, B.y);
+  ctx.moveTo(P0.x, P0.y);
+  ctx.lineTo(P1.x, P1.y);
+  ctx.lineTo(P2.x, P2.y);
   ctx.closePath();
   ctx.fillStyle = topG;
   ctx.fill();
-  // 顶面内侧一条亮棱（沿内缘 A→B）：把顶面与发射道墙面分开
-  ctx.beginPath();
-  ctx.moveTo(A.x - 1.4, A.y);
-  ctx.lineTo(B.x - 1.4, B.y);
-  ctx.strokeStyle = 'rgba(198,218,252,.55)';
-  ctx.lineWidth = 1.6;
-  ctx.stroke();
 
-  /* ---------- ③ 受光斜面：沿斜边外侧的橙色木纹带 ---------- */
-  /* 橙带 = 沿斜边向外凸出的梯形：A 端满宽、C 端收窄成尖，
-     这样外尖顺着三角的尖角收口，不会在顶端留一个"平头"。 */
-  const wA = WALL, wC = WALL * 0.34;
-  ctx.beginPath();
-  ctx.moveTo(A.x, A.y);
-  ctx.lineTo(C.x, C.y);
-  ctx.lineTo(C.x + nx * wC, C.y + ny * wC);
-  ctx.lineTo(A.x + nx * wA, A.y + ny * wA);
-  ctx.closePath();
-  const wallG = ctx.createLinearGradient(A.x, A.y, A.x + nx * WALL, A.y + ny * WALL);
-  wallG.addColorStop(0,   '#7d5030');
-  wallG.addColorStop(0.30,'#dd9f68');
-  wallG.addColorStop(0.60,'#c88450');
-  wallG.addColorStop(1,   '#6b4224');
-  ctx.fillStyle = wallG;
-  ctx.fill();
-  // 木纹
-  ctx.save(); ctx.clip();
-  ctx.strokeStyle = 'rgba(110,64,30,.24)';
-  ctx.lineWidth = 0.8;
-  for (let k = 1; k <= 5; k++){
-    const u = k / 6;
+  /* ③ 受光斜面：两条斜边外侧各一条青色带 —— 这是整块的"立体高度" */
+  const face = function(P, Q){
+    const dx = Q.x - P.x, dy = Q.y - P.y;
+    const L = Math.hypot(dx, dy) || 1;
+    const nx = -dy / L, ny = dx / L;
+    const FW = 3.6;
     ctx.beginPath();
-    ctx.moveTo(A.x + dx * u, A.y + dy * u);
-    ctx.lineTo(A.x + dx * u + nx * WALL, A.y + dy * u + ny * WALL);
+    ctx.moveTo(P.x, P.y);
+    ctx.lineTo(Q.x, Q.y);
+    ctx.lineTo(Q.x + nx * FW, Q.y + ny * FW);
+    ctx.lineTo(P.x + nx * FW, P.y + ny * FW);
+    ctx.closePath();
+    const g = ctx.createLinearGradient(P.x, P.y, P.x + nx * FW, P.y + ny * FW);
+    g.addColorStop(0,    'rgba(20,44,82,.96)');
+    g.addColorStop(0.5,  'rgba(64,136,196,.94)');
+    g.addColorStop(1,    'rgba(128,204,244,.80)');
+    ctx.fillStyle = g;
+    ctx.fill();
+    // 棱线：暗底 + 青 + 亮青
+    ctx.beginPath();
+    ctx.moveTo(P.x + nx * FW, P.y + ny * FW);
+    ctx.lineTo(Q.x + nx * FW, Q.y + ny * FW);
+    ctx.strokeStyle = 'rgba(6,12,26,.88)';
+    ctx.lineWidth = 2.2;
     ctx.stroke();
-  }
-  ctx.restore();
-
-  /* ---------- ④ 分段：沿斜边切三道缝，读作三段拼接的立体结构 ---------- */
-  const SEGS = 3;
-  for (let s2 = 1; s2 < SEGS; s2++){
-    const u = s2 / SEGS;
-    const px = A.x + dx * u, py = A.y + dy * u;
-    const wHere = wA + (wC - wA) * u;
-    ctx.beginPath();
-    ctx.moveTo(px, py);
-    ctx.lineTo(px + nx * wHere, py + ny * wHere);
-    ctx.strokeStyle = 'rgba(14,8,10,.80)';
-    ctx.lineWidth = 2.6;
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(px + nx * 1.4, py + ny * 1.4);
-    ctx.lineTo(px + nx * (wHere - 2), py + ny * (wHere - 2));
-    ctx.strokeStyle = 'rgba(255,214,168,.22)';
+    ctx.strokeStyle = 'rgba(196,240,255,.66)';
     ctx.lineWidth = 1;
     ctx.stroke();
-  }
+  };
+  face(P0, P1);
+  face(P1, P2);
 
-  /* ---------- ⑤ 红边勾勒 ---------- */
+  /* ⑤ 整体青棱边 */
   ctx.beginPath();
-  ctx.moveTo(A.x, A.y);
-  ctx.lineTo(C.x, C.y);
-  ctx.lineTo(B.x, B.y);
+  ctx.moveTo(P0.x, P0.y);
+  ctx.lineTo(P1.x, P1.y);
+  ctx.lineTo(P2.x, P2.y);
   ctx.closePath();
-  ctx.strokeStyle = 'rgba(12,6,9,.95)';
-  ctx.lineWidth = 2.8;
+  ctx.strokeStyle = 'rgba(6,12,26,.94)';
+  ctx.lineWidth = 2.4;
   ctx.stroke();
-  ctx.strokeStyle = 'rgba(160,38,48,.95)';
-  ctx.lineWidth = 1.4;
-  ctx.stroke();
-  // 斜棱外沿一道红：把斜面框住，读作凸起的棱
-  ctx.beginPath();
-  ctx.moveTo(A.x + nx * wA, A.y + ny * wA);
-  ctx.lineTo(C.x + nx * wC, C.y + ny * wC);
-  ctx.strokeStyle = 'rgba(12,6,9,.9)';
-  ctx.lineWidth = 2.2;
-  ctx.stroke();
-  ctx.strokeStyle = 'rgba(140,30,40,.85)';
-  ctx.lineWidth = 1.1;
+  ctx.strokeStyle = 'rgba(94,200,255,.82)';
+  ctx.lineWidth = 1.3;
   ctx.stroke();
 
-  /* ---------- ⑥ 三枚落靶：骑在斜棱上 ---------- */
-  const TW = 17, TH = 8.5;
-  const ang = Math.atan2(dy, dx);
-  for (let i = 0; i < DROP_BANK.t.length; i++){
-    const tg = DROP_BANK.t[i], down = DROP_BANK.down[i], pop = DROP_BANK.pop[i];
+  /* ⑥ 内缘一道极淡亮线：把衬板和发射道墙面分开 */
+  ctx.beginPath();
+  ctx.moveTo(P0.x - 1.2, P0.y);
+  ctx.lineTo(P2.x - 1.2, P2.y);
+  ctx.strokeStyle = 'rgba(140,190,240,.30)';
+  ctx.lineWidth = 1.2;
+  ctx.stroke();
+
+  /* ⑦ 三条靶条：水平横条，骑在斜棱上（整台唯一的绿，"该打这里"一眼认出） */
+  const TW = 18, TH = 6.4;
+  for (let i = 0; i < B.t.length; i++){
+    const tg = B.t[i], down = B.down[i], pop = B.pop[i];
     ctx.save();
-    ctx.translate(tg.x + nx * (WALL * 0.40), tg.y + ny * (WALL * 0.40));
-    ctx.rotate(ang);
+    ctx.translate(tg.x, tg.y);
     if (down){
-      /* 已击落：靶身倒平压进棱里——暗琥珀色薄片 + 金属边，
-         不能画成纯黑（纯黑会读成"两个洞"，像台面破了）。 */
-      ctx.fillStyle = 'rgba(58,42,16,.92)';
-      ctx.fillRect(-TW / 2, -TH / 2 + 1.4, TW, TH - 2.8);
-      ctx.strokeStyle = 'rgba(160,124,72,.62)';
+      // 已击落：靶条压平贴回棱面，只剩暗槽 + 槽口高光
+      ctx.fillStyle = 'rgba(10,22,14,.92)';
+      ctx.fillRect(-TW / 2, -TH / 2 + 1.2, TW, TH - 2.4);
+      ctx.strokeStyle = 'rgba(110,170,130,.48)';
       ctx.lineWidth = 1;
-      ctx.strokeRect(-TW / 2 + 0.5, -TH / 2 + 1.4, TW - 1, TH - 2.8);
-      ctx.fillStyle = 'rgba(226,182,120,.30)';
-      ctx.fillRect(-TW / 2 + 1.6, -TH / 2 + 1.6, TW - 3.2, 0.9);
+      ctx.strokeRect(-TW / 2 + 0.5, -TH / 2 + 1.2, TW - 1, TH - 2.4);
+      ctx.fillStyle = 'rgba(160,240,180,.26)';
+      ctx.fillRect(-TW / 2 + 1.4, -TH / 2 + 1.4, TW - 2.8, 0.9);
     } else {
-      /* 靶面：原版那块橄榄绿。整台机器唯一的绿，"该打这里"一眼认出。 */
-      const g2 = ctx.createLinearGradient(-TW / 2, -TH / 2, TW / 2, TH / 2);
-      g2.addColorStop(0,    '#dbe86e');
-      g2.addColorStop(0.42, '#a9bd3b');
-      g2.addColorStop(0.78, '#7c8f25');
-      g2.addColorStop(1,    '#586718');
+      const g2 = ctx.createLinearGradient(0, -TH / 2, 0, TH / 2);
+      g2.addColorStop(0,    '#c8ff8a');
+      g2.addColorStop(0.38, '#8ce85c');
+      g2.addColorStop(0.76, '#4faa2c');
+      g2.addColorStop(1,    '#35701c');
       ctx.fillStyle = g2;
       if (pop > 0.05){
-        ctx.shadowColor = 'rgba(200,230,90,.95)';
+        ctx.shadowColor = 'rgba(140,232,92,.95)';
         ctx.shadowBlur = pop * 16;
       }
-      /* 靶座凹槽：先压一块略大的暗底，让靶看起来"嵌在棱上"而不是贴上去 */
-      ctx.fillStyle = 'rgba(22,12,8,.55)';
-      ctx.fillRect(-TW / 2 - 1.6, -TH / 2 - 1.6, TW + 3.2, TH + 3.2);
-      ctx.fillStyle = g2;
       ctx.fillRect(-TW / 2, -TH / 2, TW, TH);
       ctx.shadowBlur = 0;
-      ctx.strokeStyle = 'rgba(26,34,8,.92)';
+      ctx.strokeStyle = 'rgba(14,30,8,.92)';
       ctx.lineWidth = 1;
       ctx.strokeRect(-TW / 2, -TH / 2, TW, TH);
-      ctx.fillStyle = 'rgba(32,40,10,.55)';
-      ctx.fillRect(-TW / 2 + 2.5, -0.6, TW - 5, 1.2);
-      // 外缘厚度面
-      ctx.fillStyle = 'rgba(40,50,12,.85)';
-      ctx.fillRect(-TW / 2, TH / 2, TW, 1.8);
+      ctx.fillStyle = 'rgba(22,44,10,.50)';
+      ctx.fillRect(-TW / 2 + 2, -0.5, TW - 4, 1);
+      ctx.fillStyle = 'rgba(30,58,14,.85)';
+      ctx.fillRect(-TW / 2, TH / 2, TW, 1.5);
+      /* 靶座：靶条右端一块暗色承托，把"浮空"钉回棱上 */
+      ctx.fillStyle = 'rgba(10,18,34,.92)';
+      ctx.fillRect(TW / 2 - 1, -TH / 2 - 1.6, 5.5, TH + 3.2);
+      ctx.strokeStyle = 'rgba(120,190,240,.55)';
+      ctx.lineWidth = 0.9;
+      ctx.strokeRect(TW / 2 - 1, -TH / 2 - 1.6, 5.5, TH + 3.2);
     }
     ctx.restore();
   }
