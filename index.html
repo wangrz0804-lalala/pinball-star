@@ -7928,7 +7928,13 @@ function renderFrame(){
    即使渲染中途抛错，也必须贴图，否则真机会定格在带色中间态（看起来就是整屏蒙了一层颜色）。 */
 function render(){
   try { renderFrame(); }
-  catch(e){ if (!window.__PS_DRAWERR) window.__PS_DRAWERR = (e && e.message) || String(e); }
+  catch(e){
+    if (!window.__PS_DRAWERR){
+      window.__PS_DRAWERR = (e && e.message) || String(e);
+      // 只报一次：真机没法调试，控制台/背板水印是唯一线索，不必每帧刷屏
+      try { console.error('PSDRAWERR ' + window.__PS_DRAWERR); } catch(e2){}
+    }
+  }
   finally { if (typeof presentBack === 'function') presentBack(); }
 }
 

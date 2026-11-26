@@ -7943,7 +7943,13 @@ function renderFrame(){
 
 function render(){
   try { renderFrame(); }
-  catch(e){ if (!window.__PS_DRAWERR) window.__PS_DRAWERR = (e && e.message) || String(e); }
+  catch(e){
+    if (!window.__PS_DRAWERR){
+      window.__PS_DRAWERR = (e && e.message) || String(e);
+      // 只报一次：真机没法调试，控制台/背板水印是唯一线索，不必每帧刷屏
+      try { console.error('PSDRAWERR ' + window.__PS_DRAWERR); } catch(e2){}
+    }
+  }
   finally { if (typeof presentBack === 'function') presentBack(); }
 }
 
