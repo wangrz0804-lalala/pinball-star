@@ -533,7 +533,14 @@ const state = {
   warpChain: 0,             // 虫洞连锁计数
   warpChainT: 0,
   rideId: 0,                // 二层坡道行程编号 (每上一次坡道 +1)
-  deployZone: 'lower'       // 当前蓄力指向的部署区
+  deployZone: 'lower',      // 当前蓄力指向的部署区
+
+  /* ---- 原版补全：摇台热量 / 反射射门 / 超空间 / Jackpot 翻倍 ---- */
+  nudgeHeat: 0,             // 0..1 摇台热量：>0.5 出警告，>=1 才 TILT（原版双阈值）
+  tiltWarn: 0,              // 警告提示剩余秒数
+  reflexT: 0,               // 反射射门窗口剩余秒数（挡板击球后开启）
+  reflexUsed: false,        // 本次窗口是否已结算，防止连打刷分
+  hyperT: 0                 // 超空间奖励剩余秒数
 };
 
 /* ---------------------------- missions ---------------------------- */
@@ -833,6 +840,32 @@ const POSTS = [
   {x:402, y:438, r:10, c:C.violet, pop:0, pts:150}
 ];   // 镜像规范：x_left + x_right = 480、y 相同
 
+/* ============================ 原版补全区 ============================ */
+/* ① 落靶 (Drop Targets)：3 枚竖排在右墙内侧。立着时是实体，撞上即被击落；
+   3 枚全落给一笔奖励并复位。原版台面右侧有一组同款，是"看得见的进度条"。 */
+const DROP_BANK = {
+  x: 374, y0: 486, gap: 30, w: 20, h: 8,
+  down: [false, false, false], pop: [0, 0, 0], cd: 0, resetT: 0
+};
+DROP_BANK.t = [0, 1, 2].map(function(i){ return {x: DROP_BANK.x, y: DROP_BANK.y0 + i * DROP_BANK.gap}; });
+
+/* ② 危险带 (Hazard Banks)：两侧挡板入口处各 3 盏，球滚过即点亮（纯传感器）。
+   单侧 3 盏全亮 → 中央挡柱升起 6 秒 + 奖励，然后清空重来。 */
+/* 位置贴着两侧 inlane 导轨（球出局必经之路）：滚过就点亮，
+   填满一侧升起中央挡柱——把"这一球要丢了"变成一次主动的救球机会。 */
+const HAZARDS = [
+  {side:'L', x:[70, 88, 106], y:[658, 668, 678], lit:[false,false,false], pop:[0,0,0]},
+  {side:'R', x:[410, 392, 374], y:[658, 668, 678], lit:[false,false,false], pop:[0,0,0]}
+];
+
+/* ③ 中央挡柱 (Center Post)：排水口正中的可升降立柱，升起时封住中央直落。
+   由危险带填满触发（原版 Center Post 的用法）。 */
+const CENTER_POST = {x:240, y:756, r:7, up:0, t:0};
+
+/* ④ 超空间 (Hyperspace)：环道顶点的 rollover。三盏星道灯全亮后冲过顶点，
+   触发一次超空间发射：大额奖励 + 倍率，并清空星道灯重来。 */
+const HYPER = {x:240, y:56, r:16, cd:0, pop:0};
+
 /* ============================ 二层平台 (DECK-2 island) ============================ */
 /* 原版《Space Cadet》高架台面的逆向复刻——**有向流程**（自上而下）：
    ① 坡道从右侧上台，经架空桥（桥下留通道给一层球穿过）→ 顶部交付口 → 交付点；
@@ -1061,6 +1094,13 @@ LANE_LAMPS.forEach(function(l, i){
 spot('shooter', 434, 700, '发射槽');
 spot('deck', DECK2.cx, DECK2.cy, '二层高架平台');
 spot('posts', 240, 474, '两侧翼柱');
+/* 补全区的引导点：引导箭头与任务标记都从这里取坐标 */
+spot('lramp', RAMP.x, RAMP.y, '左发射坡道');
+spot('hyper', HYPER.x, HYPER.y + 16, '超空间顶点');
+spot('drop',  DROP_BANK.x - 30, (DROP_BANK.t[0].y + DROP_BANK.t[2].y) / 2, '落靶架');
+spot('hzL', HAZARDS[0].x[1], HAZARDS[0].y[1] - 20, '左危险带');
+spot('hzR', HAZARDS[1].x[1], HAZARDS[1].y[1] - 20, '右危险带');
+spot('mt0', MISSION_TARGETS[0].x, MISSION_TARGETS[0].y, '任务靶');
 
 /* ---------------------------- campaign log ---------------------------- */
 /* Nine ranks = nine chapters. Each chapter fixes which three missions are on the
@@ -1278,6 +1318,16 @@ function popText(x, y, text, color){
 
 /* ---------------------------- scoring ---------------------------- */
 function addScore(n, x, y, color){
+  /* 反射射门 Reflex Shot：挡板击球后 1.4 秒内命中计分目标，追加 25%。
+     reflexUsed 保证一次挡板只能触发一次，避免连打刷分。 */
+  if (state.reflexT > 0 && !state.reflexUsed && n >= 500){
+    state.reflexUsed = true;
+    const rb = Math.round(n * state.mult * (state.rewardMult || 1) * 0.25);
+    state.score += rb;
+    state.banner = {t:1.3, text:'REFLEX SHOT', sub:'+' + rb};
+    if (x !== undefined) popText(x, y - 16, 'REFLEX +' + rb, C.gold);
+    sfx.select();
+  }
   const v = Math.round(n * state.mult * (state.rewardMult || 1));
   state.score += v;
 
@@ -1346,7 +1396,7 @@ function selectMission(slot){
   DOCK.spin = 1;
   const def = missionSlots()[slot];
   if (!def) return;
-  state.banner = {t:1.4, text:'任务已装填', sub:'撞下层任务接取站领取 · ' + def.zh};
+  state.banner = {t:1.4, text:'任务已装填', sub:'上左发射坡道接取 · ' + def.zh};
   sfx.select();
   burst(DECK_LANES[slot].x, DECK_LANES[slot].y, C.cyan, 12, 200);
 }
@@ -1387,8 +1437,16 @@ function dockHit(b){
   b.y = DOCK.y + 6;
   state.shake = 6;
 
+  /* 任务站不再发任务：原版只有坡道能接。这里改成"任务数据补给站"——
+     有装填槽时提示去坡道，没装填时提示先去任务靶选任务。 */
   if (!state.mission){
-    if (startMission(state.dockSlot)) state.shake = 9;
+    if (state.selected >= 0){
+      state.banner = {t:1.5, text:'任务已装填', sub:'上左发射坡道接取'};
+    } else {
+      state.banner = {t:1.5, text:'未选择任务', sub:'先打亮顶部三个任务靶'};
+    }
+    sfx.select();
+    addScore(1500, DOCK.x, DOCK.y - 34, C.gold);
     return;
   }
   addScore(3000, DOCK.x, DOCK.y - 34, C.gold);
@@ -1455,6 +1513,13 @@ function completeMission(){
   const bonus = m.def.bonus + state.rank * 12000;
   addScore(bonus);
 
+  /* Jackpot 随任务累积：每完成 2 个任务翻一倍（上限 500 万），对应原版 Jackpot Doubled。 */
+  let jpDoubled = false;
+  if (state.missionsDone % 2 === 0 && state.jackpot < 5000000){
+    state.jackpot = Math.min(5000000, state.jackpot * 2);
+    jpDoubled = true;
+  }
+
   // The original grants a REPLAY (a ball save, not just points) on mission completion.
   grantReplay();
 
@@ -1467,7 +1532,7 @@ function completeMission(){
   }
   openBlackHole(15 + state.rank * 2, '任务完成');
 
-  state.banner = {t:2.0, text:'任务完成', sub:m.def.name + '  +' + bonus};
+  state.banner = {t:2.0, text:'任务完成', sub:m.def.name + '  +' + bonus + (jpDoubled ? ' · JACKPOT ×2' : '')};
   state.flash = 1;
   state.shake = 10;
   sfx.rank();
@@ -1743,6 +1808,9 @@ function flipperCollide(b, f){
     const k = Math.min(1, Math.abs(f.omega) / 19);
     b.vx += nx * 240 * k;
     b.vy += ny * 240 * k;
+    // 挡板主动击球：开启反射射门窗口
+    state.reflexT = 1.4;
+    state.reflexUsed = false;
   }
 }
 
@@ -1892,6 +1960,122 @@ function hitLane(i){
   }
 }
 
+/* ---------------------------- 原版补全区的命中处理 ---------------------------- */
+/* 落靶：一枚被打落就不再挡球；3 枚全落给奖励并复位靶架。 */
+function hitDropTarget(i){
+  if (DROP_BANK.down[i] || DROP_BANK.cd > 0) return;
+  DROP_BANK.cd = 0.10;
+  DROP_BANK.down[i] = true;
+  DROP_BANK.pop[i] = 1;
+  const t = DROP_BANK.t[i];
+  addScore(2500, t.x - 28, t.y - 12, C.cyan);
+  burst(t.x, t.y, C.cyan, 10, 200);
+  sfx.select();
+  missionProgress('drop', 1);
+  const n = DROP_BANK.down.filter(Boolean).length;
+  if (n >= 3){
+    DROP_BANK.resetT = 1.8;
+    const bonus = 25000 + state.rank * 8000;
+    addScore(bonus, DROP_BANK.x - 70, DROP_BANK.t[1].y - 28, C.gold);
+    state.banner = {t:1.9, text:'落靶全清', sub:'+' + bonus + ' · 靶架即将复位'};
+    state.flash = 0.9; state.shake = 9;
+    sfx.rank();
+    burst(DROP_BANK.x - 20, DROP_BANK.t[1].y, C.gold, 24, 300);
+  } else {
+    state.banner = {t:1.1, text:'落靶 ' + n + '/3', sub:'还有 ' + (3 - n) + ' 枚'};
+  }
+}
+
+/* 危险带：单侧 3 盏填满 → 中央挡柱升起 6 秒（原版 Center Post）。 */
+function hitHazard(side, i){
+  const hz = HAZARDS[side === 'L' ? 0 : 1];
+  if (!hz || hz.lit[i]) return;
+  hz.lit[i] = true;
+  hz.pop[i] = 1;
+  addScore(800, hz.x[i], hz.y[i] - 14, C.cyan);
+  burst(hz.x[i], hz.y[i], C.cyan, 8, 160);
+  sfx.fuel();
+  missionProgress('hz', 1);
+  if (hz.lit[0] && hz.lit[1] && hz.lit[2]){
+    hz.lit = [false, false, false];
+    CENTER_POST.up = 1;
+    CENTER_POST.t = 6.0;
+    const bonus = 20000 + state.rank * 5000;
+    addScore(bonus, hz.x[1], hz.y[1] - 26, C.gold);
+    state.banner = {t:1.9, text:'危险带填满', sub:'中央挡柱升起 · 6 秒护球 · +' + bonus};
+    state.flash = 0.8; state.shake = 7;
+    sfx.rank();
+    burst(240, 740, C.cyan, 20, 260);
+  }
+}
+
+/* 超空间：三盏星道灯全亮时冲过环道顶点才算触发，否则只是普通过路分。 */
+function hitHyper(){
+  if (HYPER.cd > 0) return;
+  HYPER.cd = 2.0;
+  HYPER.pop = 1;
+  if (!(state.lanes[0] && state.lanes[1] && state.lanes[2])){
+    addScore(1200, HYPER.x, HYPER.y + 26, C.violet);
+    return;
+  }
+  state.lanes = [false, false, false];
+  state.hyperT = 12;
+  const bonus = 40000 + state.rank * 15000;
+  addScore(bonus, HYPER.x, HYPER.y + 42, C.violet);
+  state.mult = Math.min(9, state.mult + 1);
+  state.banner = {t:2.0, text:'超空间发射', sub:'+' + bonus + ' · 倍率 ×' + state.mult};
+  state.flash = 1; state.shake = 12;
+  sfx.rank();
+  burst(HYPER.x, HYPER.y, C.violet, 30, 320);
+  missionProgress('hyper', 1);
+}
+
+/* ---------------------------- 引导层 (guidance) ---------------------------- */
+/* 原版最狠的一招：屏幕上永远只有一句"现在该干什么"。这里把它收成一个统一状态，
+   HUD 的指令行与台面箭头共用同一来源，保证两者永不打架。 */
+function guideNow(){
+  if (state.mode !== 'play' && state.mode !== 'ready') return null;
+  if (state.tilt > 0){
+    return {text:'倾斜复位 ' + state.tilt.toFixed(1) + 's', sub:'挡板暂时失效', spot:null, c:C.red};
+  }
+
+  const m = state.mission;
+  if (m){
+    const st = stageNow();
+    if (st){
+      return {
+        text: m.def.zh + ' · ' + (st.zh || ''),
+        sub: '剩余 ' + Math.max(0, st.goal - m.prog) + '/' + st.goal,
+        spot: st.spot || null, c: C.green
+      };
+    }
+  }
+
+  /* 已装填未接取：原版只有坡道能接任务，这一步是核心手感。 */
+  if (state.selected >= 0){
+    const def = missionSlots()[state.selected];
+    return {
+      text: '上发射坡道 接取' + (def ? '「' + def.zh + '」' : '任务'),
+      sub: '坡道口在左中区', spot: 'lramp', c: C.gold
+    };
+  }
+
+  if (state.lanes[0] && state.lanes[1] && state.lanes[2]){
+    return {text:'超空间就绪', sub:'沿环道冲过顶点', spot:'hyper', c: C.violet};
+  }
+
+  const downCount = DROP_BANK.down.filter(Boolean).length;
+  if (downCount > 0 && downCount < 3){
+    return {text:'落靶还剩 ' + (3 - downCount) + ' 枚', sub:'右墙靶架', spot:'drop', c: C.cyan};
+  }
+
+  if (state.bhOpen > 0){
+    return {text:'黑洞在线 ' + Math.ceil(state.bhOpen) + 's', sub:'送球进右上黑洞', spot:'w0', c:'#c9b6ff'};
+  }
+
+  return {text:'打亮任务靶 选任务', sub:'击打顶部弧线的三个任务靶', spot:'mt0', c:'rgba(140,175,235,.85)'};
+}
+
 const BUMPER_LV_C = ['#4fa8ff', '#3ddc84', '#ffd166', '#ff5470'];
 const BUMPER_LV_PTS = [40, 150, 400, 1000];
 
@@ -1919,7 +2103,6 @@ function nudge(dir){
   if (state.mode !== 'play') return;
   ac();
   if (state.tilt > 0) return;
-  state.nudge += 1;
   state.nudgeDir = (dir >= 0) ? 1 : -1;   // which way the pseudo-3D table leans
   for (let i = 0; i < balls.length; i++){
     balls[i].vx += dir * 130;
@@ -1927,14 +2110,23 @@ function nudge(dir){
   }
   state.shake = 7;
   sfx.nudge();
-  if (state.nudge >= 3){
-    state.nudge = 0;
+
+  /* 原版是双阈值：先累积到警告线（Careful...），再累积才 TILT。
+     摇一下就罚玩家会觉得莫名其妙；热量随时间回落，所以"连摇"才危险。 */
+  state.nudgeHeat = Math.min(1.2, state.nudgeHeat + 0.34);
+  if (state.nudgeHeat >= 1.0){
+    state.nudgeHeat = 0;
     state.tilt = 3.0;
+    state.tiltWarn = 0;
     leftF.pressed = false;
     rightF.pressed = false;
     state.banner = {t:1.8, text:'TILT', sub:'推桌过度 · 挡板 3 秒失效'};
     sfx.tilt();
     state.shake = 14;
+  } else if (state.nudgeHeat >= 0.5 && state.tiltWarn <= 0){
+    state.tiltWarn = 2.0;
+    state.banner = {t:1.5, text:'小心…', sub:'再推就要倾斜了'};
+    sfx.select();
   }
 }
 
@@ -2103,6 +2295,18 @@ function restart(mode){
   state.bhOpen = 0; state.bhPulse = 0; state.bhCd = 0;
   state.warpLink = null; state.warpChain = 0; state.warpChainT = 0;
   state.rideId = 0; state.deployZone = 'lower';
+  // 原版补全区复位
+  state.nudgeHeat = 0; state.tiltWarn = 0;
+  state.reflexT = 0; state.reflexUsed = false; state.hyperT = 0;
+  DROP_BANK.down = [false, false, false];
+  DROP_BANK.resetT = 0; DROP_BANK.cd = 0;
+  for (let i = 0; i < 3; i++){ DROP_BANK.pop[i] = 0; }
+  for (let k = 0; k < HAZARDS.length; k++){
+    HAZARDS[k].lit = [false, false, false];
+    for (let i = 0; i < 3; i++) HAZARDS[k].pop[i] = 0;
+  }
+  CENTER_POST.up = 0; CENTER_POST.t = 0;
+  HYPER.cd = 0; HYPER.pop = 0;
   DOCK.pop = 0; DOCK.spin = 0;
   for (let i = 0; i < DOCK_POSTS.length; i++) DOCK_POSTS[i].pop = 0;
   BLACKHOLE.pop = 0; BLACKHOLE.pull = 0;
@@ -2426,6 +2630,16 @@ function stepBall(b, dt){
     b.trail.length = 0;
     if (t >= 1){
       b.rampT = undefined; b.rampZ = 0; b.rampV = undefined;
+      /* 原版唯一的接任务入口：冲上坡道 = 接受任务。
+         先在任务靶上选好槽位（state.selected），这一杆才算数。 */
+      if (!state.mission && state.selected >= 0){
+        const accSlot = state.selected;
+        if (startMission(accSlot)){
+          const def = missionSlots()[accSlot];
+          state.banner = {t:2.0, text:'任务已接受', sub:(def ? def.zh : '') + ' · 按屏幕提示推进'};
+          burst(b.x, b.y, C.gold, 20, 280);
+        }
+      }
       b.deck = 'upper';
       b.x = RAMP.tx; b.y = RAMP.ty;
       // 交付后向下落入过渡区（①→②）：轻微横向散开，靠重力开始下落流程
@@ -2646,6 +2860,33 @@ function stepBall(b, dt){
         selectMission(mt.slot);
       }
     }
+    /* ---- 原版补全区 ---- */
+    // 落靶：立着的是实体横条，被打落的不再挡球
+    for (let i = 0; i < DROP_BANK.t.length; i++){
+      if (DROP_BANK.down[i]) continue;
+      const dtg = DROP_BANK.t[i];
+      if (resolveSeg(b, dtg.x - DROP_BANK.w / 2, dtg.y, dtg.x + DROP_BANK.w / 2, dtg.y,
+                     DROP_BANK.h / 2, 0.42)) hitDropTarget(i);
+    }
+    // 中央挡柱：只在升起时是实体
+    if (CENTER_POST.up > 0.05){
+      resolveCirc(b, CENTER_POST.x, CENTER_POST.y - 20 * CENTER_POST.up, CENTER_POST.r, 0.45);
+    }
+    // 危险带：纯传感器，滚过即点亮
+    for (let k = 0; k < HAZARDS.length; k++){
+      const hz = HAZARDS[k];
+      for (let i = 0; i < 3; i++){
+        if (hz.lit[i]) continue;
+        const dx = b.x - hz.x[i], dy = b.y - hz.y[i];
+        if (dx * dx + dy * dy < 15 * 15) hitHazard(hz.side, i);
+      }
+    }
+    // 超空间：环道顶点的 rollover
+    if (HYPER.cd <= 0){
+      const hx = b.x - HYPER.x, hy = b.y - HYPER.y;
+      if (hx * hx + hy * hy < HYPER.r * HYPER.r) hitHyper();
+    }
+
     flipperCollide(b, leftF);
     flipperCollide(b, rightF);
 
@@ -2955,6 +3196,38 @@ function update(dt){
   if (state.banner){ state.banner.t -= dt; if (state.banner.t <= 0) state.banner = null; }
   if (state.tilt > 0) state.tilt = Math.max(0, state.tilt - dt);
   state.nudge = Math.max(0, state.nudge - dt * 0.55);
+  // 摇台热量与警告：热量自然回落，连摇才危险（原版双阈值倾斜）
+  if (state.nudgeHeat > 0) state.nudgeHeat = Math.max(0, state.nudgeHeat - dt * 0.30);
+  if (state.tiltWarn > 0) state.tiltWarn = Math.max(0, state.tiltWarn - dt);
+  if (state.reflexT > 0){
+    state.reflexT = Math.max(0, state.reflexT - dt);
+    if (state.reflexT === 0) state.reflexUsed = false;
+  }
+  if (state.hyperT > 0) state.hyperT = Math.max(0, state.hyperT - dt);
+
+  // 中央挡柱升降
+  if (CENTER_POST.t > 0){
+    CENTER_POST.t = Math.max(0, CENTER_POST.t - dt);
+    CENTER_POST.up = Math.min(1, CENTER_POST.up + dt * 5);
+  } else if (CENTER_POST.up > 0){
+    CENTER_POST.up = Math.max(0, CENTER_POST.up - dt * 4);
+  }
+  // 落靶复位
+  if (DROP_BANK.cd > 0) DROP_BANK.cd = Math.max(0, DROP_BANK.cd - dt);
+  if (DROP_BANK.resetT > 0){
+    DROP_BANK.resetT -= dt;
+    if (DROP_BANK.resetT <= 0){
+      DROP_BANK.down = [false, false, false];
+      DROP_BANK.resetT = 0;
+      state.banner = {t:1.2, text:'靶架复位', sub:'3 枚落靶重新立起'};
+      sfx.select();
+    }
+  }
+  for (let i = 0; i < 3; i++) DROP_BANK.pop[i] *= Math.pow(0.02, dt);
+  for (let k = 0; k < HAZARDS.length; k++)
+    for (let i = 0; i < 3; i++) HAZARDS[k].pop[i] *= Math.pow(0.02, dt);
+  if (HYPER.cd > 0) HYPER.cd = Math.max(0, HYPER.cd - dt);
+  HYPER.pop *= Math.pow(0.02, dt);
   for (let i = 0; i < WORMS.length; i++) state.wormCd[i] = Math.max(0, state.wormCd[i] - dt);
 
   // plunger charge builds while held (space / touch)
@@ -3522,7 +3795,7 @@ function drawBackglass(){
     tinyText('已装填 ' + (def ? def.zh : ''), 96, 100, 11, C.gold, 'left', '0.4px');
     const pulse = 0.5 + 0.5 * Math.sin(state.time * 6);
     ctx.globalAlpha = 0.45 + pulse * 0.55;
-    tinyText('撞下层任务接取站领取', 300, 100, 10, C.cyan, 'left', '0.2px');
+    tinyText('上左发射坡道 接取任务', 300, 100, 10, C.cyan, 'left', '0.2px');
     ctx.globalAlpha = 1;
   } else if (state.drill){
     // 教官紧急指令: label + progress + a draining countdown bar, impossible to miss
@@ -3538,18 +3811,19 @@ function drawBackglass(){
     ctx.shadowBlur = 0;
     tinyText(d.prog + '/' + d.goal + ' ' + Math.ceil(d.tLeft) + 's', 408, 100, 9, C.orange, 'left', '0.3px');
   } else {
-    const onDeck = balls.some(function(bb){ return !bb.hidden && bb.deck === 'upper'; });
-    if (onDeck){
-      tinyText('二层圆盘 · 撞击计分 / 分流装填任务', 96, 100, 10, C.gold, 'left', '0.2px');
-      ctx.globalAlpha = 0.6 + 0.4 * Math.sin(state.time * 6);
-      tinyText('三路通道全亮 → 多球', 316, 100, 9, 'rgba(255,159,67,.9)', 'left', '0.2px');
-      ctx.globalAlpha = 1;
-    } else {
-      tinyText('撞下层任务接取站 领任务', 96, 100, 11, 'rgba(140,175,235,.72)', 'left', '0.2px');
+    /* 指令行：整局永远有一句"现在该干什么"（原版指引的核心） */
+    const g = guideNow();
+    if (g){
+      tinyText(g.text, 96, 100, 10, g.c, 'left', '0.2px');
+      if (g.sub){
+        ctx.globalAlpha = 0.5 + 0.35 * Math.sin(state.time * 5);
+        tinyText(g.sub, 306, 100, 9, 'rgba(150,190,240,.95)', 'left', '0.2px');
+        ctx.globalAlpha = 1;
+      }
     }
     if (state.tilt > 0){
       ctx.globalAlpha = 0.9;
-      tinyText('TILT ' + state.tilt.toFixed(1), 320, 100, 12, C.red, 'left', '1px');
+      tinyText('TILT ' + state.tilt.toFixed(1), 306, 100, 11, C.red, 'left', '1px');
       ctx.globalAlpha = 1;
     }
   }
@@ -4257,47 +4531,187 @@ function drawSpotNamesRaw(){
   ctx.restore();
 }
 
+/* ---- 原版补全区：落靶 / 危险带 / 中央挡柱 / 超空间 ---- */
+function drawDropBank(){
+  ctx.save();
+  // 靶架：一条贴右墙的深色导轨，读作"靶的底座"
+  ctx.strokeStyle = 'rgba(24,34,60,.95)';
+  ctx.lineWidth = 8; ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(DROP_BANK.x, DROP_BANK.t[0].y - 13);
+  ctx.lineTo(DROP_BANK.x, DROP_BANK.t[2].y + 13);
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(130,165,220,.30)'; ctx.lineWidth = 1.4; ctx.stroke();
+
+  for (let i = 0; i < DROP_BANK.t.length; i++){
+    const t = DROP_BANK.t[i], down = DROP_BANK.down[i], pop = DROP_BANK.pop[i];
+    const w = DROP_BANK.w, h = DROP_BANK.h;
+    ctx.save();
+    ctx.translate(t.x, t.y);
+    if (down){
+      // 倒下的靶：只剩一条压平的暗条，配合架子的空位读作"已击落"
+      ctx.globalAlpha = 0.5;
+      ctx.fillStyle = 'rgba(58,72,108,.9)';
+      ctx.fillRect(-w / 2, 1, w, 3);
+    } else {
+      ctx.fillStyle = 'rgba(232,244,255,.96)';
+      ctx.shadowColor = 'rgba(150,210,255,.95)';
+      ctx.shadowBlur = 7 + pop * 16;
+      ctx.fillRect(-w / 2, -h / 2, w, h);
+      ctx.shadowBlur = 0;
+      ctx.strokeStyle = 'rgba(96,134,196,.9)'; ctx.lineWidth = 1;
+      ctx.strokeRect(-w / 2, -h / 2, w, h);
+      // 靶心一道蓝线，远看像"待击落"的靶面
+      ctx.fillStyle = 'rgba(74,140,255,.75)';
+      ctx.fillRect(-w / 2 + 2, -1.1, w - 4, 2.2);
+    }
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+function drawHazards(){
+  ctx.save();
+  for (let k = 0; k < HAZARDS.length; k++){
+    const hz = HAZARDS[k];
+    // 导轨本体：沿三盏灯连成一条短轨
+    ctx.strokeStyle = 'rgba(96,130,190,.28)';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(hz.x[0] - 6, hz.y[0] - 6);
+    ctx.lineTo(hz.x[2] + 6, hz.y[2] + 6);
+    ctx.stroke();
+    for (let i = 0; i < 3; i++){
+      const x = hz.x[i], y = hz.y[i], lit = hz.lit[i], pop = hz.pop[i];
+      ctx.beginPath(); ctx.arc(x, y, 5.0, 0, 6.2832);
+      if (lit){
+        ctx.fillStyle = C.cyan;
+        ctx.shadowColor = C.cyan;
+        ctx.shadowBlur = 9 + pop * 14;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+      } else {
+        ctx.fillStyle = 'rgba(10,18,36,.95)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(110,150,210,.55)';
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+      }
+    }
+  }
+  ctx.restore();
+}
+
+function drawCenterPost(){
+  if (CENTER_POST.up <= 0.02) return;
+  const p = CENTER_POST;
+  const lift = 20 * p.up;
+  const topY = p.y - lift;
+  ctx.save();
+  // 底座（坑口）
+  ctx.fillStyle = 'rgba(6,10,22,.9)';
+  ctx.beginPath(); ctx.ellipse(p.x, p.y, 10, 4.5, 0, 0, 6.2832); ctx.fill();
+  // 柱身：左暗右亮的圆柱
+  const g = ctx.createLinearGradient(p.x - 7, 0, p.x + 7, 0);
+  g.addColorStop(0, 'rgba(10,16,32,.98)');
+  g.addColorStop(0.45, 'rgba(150,200,255,.95)');
+  g.addColorStop(1, 'rgba(10,16,32,.98)');
+  ctx.fillStyle = g;
+  ctx.fillRect(p.x - 6, topY, 12, p.y - topY);
+  // 顶帽
+  ctx.beginPath(); ctx.arc(p.x, topY, p.r, Math.PI, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = 'rgba(200,235,255,.85)';
+  ctx.lineWidth = 1.3;
+  ctx.beginPath(); ctx.arc(p.x, topY, p.r, Math.PI, Math.PI * 2); ctx.stroke();
+  // 剩余时间环
+  const k = Math.max(0, Math.min(1, p.t / 6));
+  ctx.beginPath();
+  ctx.arc(p.x, topY, p.r + 3, -Math.PI / 2, -Math.PI / 2 + 6.2832 * k);
+  ctx.strokeStyle = 'rgba(94,231,255,.85)';
+  ctx.lineWidth = 1.6;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawHyper(){
+  const p = HYPER;
+  const ready = !!(state.lanes[0] && state.lanes[1] && state.lanes[2]);
+  const pulse = 0.5 + 0.5 * Math.sin(state.time * 5);
+  ctx.save();
+  ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 6.2832);
+  if (ready){
+    ctx.strokeStyle = 'rgba(196,160,255,.95)';
+    ctx.lineWidth = 2.4;
+    ctx.shadowColor = C.violet;
+    ctx.shadowBlur = 12 + 10 * pulse;
+  } else {
+    ctx.strokeStyle = 'rgba(120,150,210,.28)';
+    ctx.lineWidth = 1.2;
+  }
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  // 中心一颗小星
+  ctx.beginPath(); ctx.arc(p.x, p.y, 3 + p.pop * 6, 0, 6.2832);
+  ctx.fillStyle = ready ? C.violet : 'rgba(120,150,210,.35)';
+  ctx.fill();
+  if (state.hyperT > 0){
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r + 7 + 6 * pulse, 0, 6.2832);
+    ctx.strokeStyle = 'rgba(220,180,255,' + (0.14 + 0.2 * pulse) + ')';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 function drawSpotMarker(){
   const st = stageNow();
   const d = state.drill;
-  // missions take precedence; otherwise the active cadet drill points at its own spot
-  if (!st && d && SPOTS[d.spot]){
-    const s = SPOTS[d.spot];
-    const pulse = 0.5 + 0.5 * Math.sin(state.time * 8);
-    ctx.save();
-    ctx.strokeStyle = 'rgba(255,159,67,' + (0.35 + pulse * 0.55) + ')';
-    ctx.lineWidth = 1.6;
-    ctx.setLineDash([5, 4]);
-    ctx.lineDashOffset = -state.time * 34;
-    ctx.beginPath();
-    ctx.arc(s.x, s.y, 24 + pulse * 6, 0, 6.2832);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.restore();
-    return;
+  /* 目标优先级：任务阶段 > 教官指令 > 引导层（接任务 / 超空间 / 落靶 / 选任务）。
+     三者共用一套画法，屏幕上永远只有一个箭头，不会互相打架。 */
+  let s = null, emphasis = 'mission';
+  if (st && st.spot && SPOTS[st.spot]) s = SPOTS[st.spot];
+  else if (d && SPOTS[d.spot]) { s = SPOTS[d.spot]; emphasis = 'drill'; }
+  else {
+    const g = guideNow();
+    if (g && g.spot && SPOTS[g.spot]) { s = SPOTS[g.spot]; emphasis = 'guide'; }
   }
-  if (!st || !st.spot || !SPOTS[st.spot]) return;
-  const s = SPOTS[st.spot];
-  const pulse = 0.5 + 0.5 * Math.sin(state.time * 6);
+  if (!s) return;
+
+  const pulse = 0.5 + 0.5 * Math.sin(state.time * (emphasis === 'drill' ? 8 : 6));
+  const base = emphasis === 'drill' ? 'rgba(255,159,67,' : 'rgba(255,255,255,';
+  const rad = emphasis === 'drill' ? 24 : 26;
   ctx.save();
-  ctx.strokeStyle = 'rgba(255,255,255,' + (0.35 + pulse * 0.5) + ')';
+  ctx.strokeStyle = base + (0.32 + pulse * 0.5) + ')';
   ctx.lineWidth = 1.6;
   ctx.setLineDash([5, 4]);
   ctx.lineDashOffset = -state.time * 26;
   ctx.beginPath();
-  ctx.arc(s.x, s.y, 26 + pulse * 5, 0, 6.2832);
+  ctx.arc(s.x, s.y, rad + pulse * 5, 0, 6.2832);
   ctx.stroke();
   ctx.setLineDash([]);
+
+  // 引导层的箭头：从上方指下来，比圆圈更像"去打这里"
+  if (emphasis === 'guide'){
+    const ay = s.y - rad - 15 - pulse * 4;
+    ctx.beginPath();
+    ctx.moveTo(s.x, ay + 11);
+    ctx.lineTo(s.x - 7, ay);
+    ctx.lineTo(s.x + 7, ay);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(255,255,255,' + (0.42 + pulse * 0.45) + ')';
+    ctx.fill();
+  }
+
   // name tag with a backing plate so it reads over any backdrop
   ctx.font = '700 9px ui-monospace,Menlo,monospace';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   const tw = ctx.measureText(s.name).width + 10;
-  const ty = s.y - 38;
+  const ty = s.y - 38 - (emphasis === 'guide' ? 20 : 0);
   ctx.fillStyle = 'rgba(4,8,20,.82)';
   rr(s.x - tw / 2, ty - 8, tw, 16, 5);
   ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,.35)';
+  ctx.strokeStyle = emphasis === 'drill' ? 'rgba(255,159,67,.45)' : 'rgba(255,255,255,.35)';
   ctx.lineWidth = 1;
   rr(s.x - tw / 2, ty - 8, tw, 16, 5);
   ctx.stroke();
@@ -6601,6 +7015,10 @@ function render(){
   drawSlings();
   drawOutGates();
   drawPosts();
+  drawDropBank();
+  drawHazards();
+  drawHyper();
+  drawCenterPost();         // 中央挡柱：升起时立在排水口正中
   drawFlippers();
   drawBumpers();
   drawDock();               // 以下均为一层台面实体：先画，被甲板/高架正确遮挡
@@ -6618,6 +7036,7 @@ function render(){
   drawBalls('upper');       // 二层球：上移 + 放大（含坡道滑行球）
   drawGate();               // 发射口单向闸门：位于发射道顶端
   drawLaneLamps();
+  drawMissionTargets();     // 三个任务靶：rollover 灯珠 + 顶部弧线灯带（此前漏画）
   drawMissionLamps();
   drawSpotNames();
   drawSpotMarker();
@@ -6989,6 +7408,9 @@ window.__PS = {
   // Space Cadet mechanics
   stageNow: stageNow, advanceStage: advanceStage, missionProgress: missionProgress,
   hitLane: hitLane, grantReplay: grantReplay, startMultiball: startMultiball,
+  hitDropTarget: hitDropTarget, hitHazard: hitHazard, hitHyper: hitHyper,
+  guideNow: guideNow, DROP_BANK: DROP_BANK, HAZARDS: HAZARDS,
+  CENTER_POST: CENTER_POST, HYPER: HYPER,
   upgradeBumpers: upgradeBumpers, setFlipper: setFlipper,
   LANE_LAMPS: LANE_LAMPS,
   // competition layer
@@ -7077,6 +7499,15 @@ if (location.hash.indexOf('#shot=') === 0){
   if (sc === 'promote'){ state.score = 5200; promote(); if (state.banner) state.banner.t = 9; }
   if (sc === 'ward'){ state.screen = 'ward'; }
   if (sc === 'pause'){ restart('classic'); state.paused = true; }
+  /* 引导层与新系统的核对态（仅截图用） */
+  if (sc === 'select'){ selectMission(0); }
+  if (sc === 'run'){ selectMission(0); startMission(0); state.mission.prog = 1; }
+  if (sc === 'dropdown'){
+    DROP_BANK.down = [true, true, false];
+    HAZARDS[0].lit = [true, true, false];
+    CENTER_POST.up = 1; CENTER_POST.t = 4.5;
+    state.lanes = [true, true, true];
+  }
 }
 if (location.hash === '#demo' || location.hash.indexOf('#ride') === 0){
   restart('classic');
