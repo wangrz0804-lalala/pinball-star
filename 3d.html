@@ -854,11 +854,13 @@ const POSTS = [
 /* ============================ 原版补全区 ============================ */
 /* ① 落靶 (Drop Targets)：3 枚竖排在右墙内侧。立着时是实体，撞上即被击落；
    3 枚全落给一笔奖励并复位。原版台面右侧有一组同款，是"看得见的进度条"。 */
+/* 原版落靶是**横排三枚**（顶部中央那组白竖条、以及左中的黄色组都是横排）。
+   这里放在右中区，横排、等距，避开虫洞与翼柱。 */
 const DROP_BANK = {
-  x: 374, y0: 486, gap: 30, w: 20, h: 8,
+  x0: 324, y: 512, gap: 27, w: 14, h: 28,
   down: [false, false, false], pop: [0, 0, 0], cd: 0, resetT: 0
 };
-DROP_BANK.t = [0, 1, 2].map(function(i){ return {x: DROP_BANK.x, y: DROP_BANK.y0 + i * DROP_BANK.gap}; });
+DROP_BANK.t = [0, 1, 2].map(function(i){ return {x: DROP_BANK.x0 + i * DROP_BANK.gap, y: DROP_BANK.y}; });
 
 /* ② 危险带 (Hazard Banks)：两侧挡板入口处各 3 盏，球滚过即点亮（纯传感器）。
    单侧 3 盏全亮 → 中央挡柱升起 6 秒 + 奖励，然后清空重来。 */
@@ -1108,7 +1110,7 @@ spot('posts', 240, 474, '两侧翼柱');
 /* 补全区的引导点：引导箭头与任务标记都从这里取坐标 */
 spot('lramp', RAMP.x, RAMP.y, '左发射坡道');
 spot('hyper', HYPER.x, HYPER.y + 16, '超空间顶点');
-spot('drop',  DROP_BANK.x - 30, (DROP_BANK.t[0].y + DROP_BANK.t[2].y) / 2, '落靶架');
+spot('drop',  DROP_BANK.t[2].x + 26, DROP_BANK.y, '落靶架');
 spot('hzL', HAZARDS[0].x[1], HAZARDS[0].y[1] - 20, '左危险带');
 spot('hzR', HAZARDS[1].x[1], HAZARDS[1].y[1] - 20, '右危险带');
 spot('mt0', MISSION_TARGETS[0].x, MISSION_TARGETS[0].y, '任务靶');
@@ -1987,11 +1989,11 @@ function hitDropTarget(i){
   if (n >= 3){
     DROP_BANK.resetT = 1.8;
     const bonus = 25000 + state.rank * 8000;
-    addScore(bonus, DROP_BANK.x - 70, DROP_BANK.t[1].y - 28, C.gold);
+    addScore(bonus, DROP_BANK.t[1].x, DROP_BANK.y - 34, C.gold);
     state.banner = {t:1.9, text:'落靶全清', sub:'+' + bonus + ' · 靶架即将复位'};
     state.flash = 0.9; state.shake = 9;
     sfx.rank();
-    burst(DROP_BANK.x - 20, DROP_BANK.t[1].y, C.gold, 24, 300);
+    burst(DROP_BANK.t[1].x, DROP_BANK.y, C.gold, 24, 300);
   } else {
     state.banner = {t:1.1, text:'落靶 ' + n + '/3', sub:'还有 ' + (3 - n) + ' 枚'};
   }
@@ -4030,53 +4032,119 @@ function drawDock(){
 }
 
 /* ---------------------------- 黑洞 ---------------------------- */
+/* ============================ 右上星云黑洞 ============================
+   原版这块不是"一个紫圈"，而是一团**旋涡状星云**：亮核 + 多层尘带 + 外围辉光。
+   我们保留自己的深蓝霓虹语言，但把结构做成星云：三层径向辉光打底，
+   再叠两条倾斜的椭圆尘带（随 time 缓慢旋进），最后压一个吸积盘 + 亮核。 */
 function drawBlackHole(){
   const h = BLACKHOLE;
   const open = state.bhOpen > 0;
-  const pul = 0.5 + 0.5 * Math.sin(state.time * (open ? 5 : 1.6));
+  const hyper = !!(state.reward && state.reward.id === 'hyperhole');
+  const t = state.time;
+  const pul = 0.5 + 0.5 * Math.sin(t * (open ? 3.4 : 1.3));
+  const R = h.ring * (hyper ? 1.45 : 1) * (open ? 1.08 : 0.92);
   ctx.save();
-  if (open){
-    const hyper = !!(state.reward && state.reward.id === 'hyperhole');
-    const ringR = h.ring * (hyper ? 1.4 : 1);
-    const g = ctx.createRadialGradient(h.x, h.y, 2, h.x, h.y, ringR);
-    g.addColorStop(0, 'rgba(0,0,0,1)');
-    g.addColorStop(0.22, 'rgba(26,8,52,.95)');
-    g.addColorStop(0.6, 'rgba(124,74,224,' + (0.17 + pul * 0.13) + ')');
-    g.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = g;
-    ctx.beginPath(); ctx.arc(h.x, h.y, ringR, 0, 6.2832); ctx.fill();
 
-    for (let k = 0; k < 3; k++){
-      const rr2 = h.r + 7 + k * 9 + pul * 3;
-      const a0 = state.time * (2.2 + k * 0.8) + k * 2;
-      ctx.strokeStyle = 'rgba(198,160,255,' + (0.55 - k * 0.13) + ')';
-      ctx.lineWidth = 2 - k * 0.4;
-      ctx.beginPath(); ctx.arc(h.x, h.y, rr2, a0, a0 + 2.1); ctx.stroke();
+  // ① 外围辉光：三层叠色（洋红 → 紫 → 深蓝），关闭时整体压暗
+  const kg = open ? 1 : 0.70;
+  const g0 = ctx.createRadialGradient(h.x, h.y, 2, h.x, h.y, R);
+  g0.addColorStop(0,    'rgba(255,214,244,' + (0.46 * kg) + ')');
+  g0.addColorStop(0.16, 'rgba(236,132,222,' + (0.40 * kg) + ')');
+  g0.addColorStop(0.42, 'rgba(146,86,214,' + (0.28 * kg) + ')');
+  g0.addColorStop(0.72, 'rgba(74,64,178,' + (0.17 * kg) + ')');
+  g0.addColorStop(1,    'rgba(12,10,40,0)');
+  ctx.fillStyle = g0;
+  ctx.beginPath(); ctx.arc(h.x, h.y, R, 0, 6.2832); ctx.fill();
+
+  /* ② 螺旋臂：原版那团星云是旋涡，不是几条闭合椭圆环
+     （闭合环会读成"土星"）。这里用 3 条对数螺旋：半径由内向外递增，
+     角度同时累积，压扁成盘面 → 真正的旋涡形态。 */
+  for (let arm = 0; arm < 3; arm++){
+    const base = arm * 2.0944 + t * 0.30 * (arm % 2 ? -1 : 1);
+    ctx.beginPath();
+    for (let k = 0; k <= 12; k++){
+      const u = k / 12;
+      const rr2 = R * (0.16 + u * 0.84);
+      const aa = base + u * 2.35;
+      const px = h.x + Math.cos(aa) * rr2;
+      const py = h.y + Math.sin(aa) * rr2 * 0.74;
+      if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
     }
-    ctx.beginPath(); ctx.arc(h.x, h.y, h.r, 0, 6.2832);
-    ctx.fillStyle = '#000';
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(202,172,255,' + (0.7 + pul * 0.3) + ')';
-    ctx.lineWidth = 2;
-    ctx.shadowColor = '#b79cff';
-    ctx.shadowBlur = 20 + h.pop * 28;
+    ctx.strokeStyle = open
+      ? 'rgba(255,206,246,' + (0.62 + 0.20 * pul - arm * 0.10) + ')'
+      : 'rgba(176,158,240,' + (0.58 - arm * 0.10) + ')';
+    ctx.lineWidth = open ? 3.6 - arm * 0.7 : 2.6 - arm * 0.5;
+    ctx.lineCap = 'round';
+    ctx.stroke();
+    /* 螺旋臂上的两处亮斑：星云的"电离结点"，让臂不是一条均匀细线 */
+    for (let s2 = 0; s2 < 2; s2++){
+      const uu = 0.42 + s2 * 0.34;
+      const rr3 = R * (0.16 + uu * 0.84);
+      const aa2 = base + uu * 2.35;
+      const bx2 = h.x + Math.cos(aa2) * rr3;
+      const by2 = h.y + Math.sin(aa2) * rr3 * 0.74;
+      ctx.beginPath();
+      ctx.arc(bx2, by2, open ? 2.2 : 1.5, 0, 6.2832);
+      ctx.fillStyle = open
+        ? 'rgba(255,232,252,' + (0.55 + 0.3 * pul) + ')'
+        : 'rgba(190,172,244,.5)';
+      ctx.fill();
+    }
+  }
+
+  // ③ 吸积盘边缘：一圈细亮环，只在开启时出现
+  if (open){
+    ctx.beginPath(); ctx.arc(h.x, h.y, h.r + 3.5, 0, 6.2832);
+    ctx.strokeStyle = 'rgba(255,214,246,' + (0.42 + 0.34 * pul) + ')';
+    ctx.lineWidth = 1.6;
+    ctx.shadowColor = '#ffb6ec';
+    ctx.shadowBlur = 14 + h.pop * 22;
     ctx.stroke();
     ctx.shadowBlur = 0;
-  } else {
-    ctx.beginPath(); ctx.arc(h.x, h.y, h.r, 0, 6.2832);
-    ctx.fillStyle = 'rgba(6,8,18,.92)';
-    ctx.fill();
+  }
+
+  // ④ 视界：纯黑圆 + 内侧一圈冷蓝反光（黑洞边缘的引力透镜感）
+  ctx.beginPath(); ctx.arc(h.x, h.y, h.r, 0, 6.2832);
+  ctx.fillStyle = '#000';
+  ctx.fill();
+  const rim = ctx.createRadialGradient(h.x, h.y, h.r * 0.55, h.x, h.y, h.r);
+  rim.addColorStop(0, 'rgba(0,0,0,0)');
+  rim.addColorStop(0.72, 'rgba(48,34,104,' + (open ? 0.62 : 0.42) + ')');
+  rim.addColorStop(1, 'rgba(158,128,238,' + (open ? 0.82 : 0.58) + ')');
+  ctx.fillStyle = rim;
+  ctx.beginPath(); ctx.arc(h.x, h.y, h.r, 0, 6.2832); ctx.fill();
+  if (!open){
     ctx.setLineDash([3, 4]);
     ctx.strokeStyle = 'rgba(146,126,206,.45)';
-    ctx.lineWidth = 1.4;
-    ctx.stroke();
+    ctx.lineWidth = 1.3;
+    ctx.beginPath(); ctx.arc(h.x, h.y, h.r, 0, 6.2832); ctx.stroke();
     ctx.setLineDash([]);
-    ctx.strokeStyle = 'rgba(146,126,206,.28)';
-    ctx.beginPath(); ctx.arc(h.x, h.y, h.r * 0.5, 0, 6.2832); ctx.stroke();
   }
+
+  // ⑤ 亮核：开启时中心一小点白光（被吸进去的物质在发光）
+  if (open){
+    ctx.globalAlpha = 0.5 + 0.4 * pul;
+    ctx.fillStyle = '#fff2fb';
+    ctx.shadowColor = '#ffd6f4';
+    ctx.shadowBlur = 16;
+    ctx.beginPath(); ctx.arc(h.x - h.r * 0.18, h.y - h.r * 0.22, 2.1, 0, 6.2832); ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.globalAlpha = 1;
+  }
+
+  // ⑥ 周围固定星点（原版星云里有一圈碎星）
+  const stars = [[-1.5,-1.2,.9],[-1.9,.3,.7],[1.6,-1.4,.8],[2.0,.6,.6],[.4,-2.1,.7],[-.6,1.9,.6],[1.2,1.7,.5]];
+  ctx.fillStyle = open ? 'rgba(255,225,250,.55)' : 'rgba(170,160,230,.30)';
+  for (let i = 0; i < stars.length; i++){
+    const s = stars[i];
+    ctx.beginPath();
+    ctx.arc(h.x + s[0] * h.r * 0.9, h.y + s[1] * h.r * 0.9, s[2], 0, 6.2832);
+    ctx.fill();
+  }
+
   ctx.globalAlpha = open ? 0.95 : 0.42;
   tinyText(open ? '黑洞 ' + Math.ceil(state.bhOpen) + 's' : '黑洞 关闭',
-           h.x, h.y + h.r + 13, 7,
+           h.x, h.y + R * 0.78, 7,
            open ? '#c9b6ff' : 'rgba(150,140,200,.62)', 'center', '1px');
   ctx.globalAlpha = 1;
   ctx.restore();
@@ -4262,6 +4330,140 @@ function drawWalls(){
   ctx.restore();
 }
 
+/* ============================ 台面结构层 ============================
+   按原版把两条"能读出这是弹球台"的骨架补出来：
+     ① 顶部环道 (orbit)：球从发射道顶端出来，沿穹顶内侧绕一圈再从左侧落下。
+        原版这里是一条有内外两侧壁的环形槽，槽上每隔一段有横档和灯座。
+     ② 发射道 (shooter lane)：不是一根霓虹线，而是一条有枕木横档的直筒，
+        顶端有一个转向帽把球拐进环道，左侧还有一条并行的窄复道。
+   全是静态图形，烘成一张缓存层，逐帧只做一次贴图。 */
+let boardStructCache = null;
+function drawBoardStructure(){
+  if (!boardStructCache) boardStructCache = renderLayerToCache(W, H, drawBoardStructureRaw);
+  if (boardStructCache) blitLayer(boardStructCache); else drawBoardStructureRaw();
+}
+function drawBoardStructureRaw(){
+  ctx.save();
+
+  /* ---------- ① 顶部环道 ---------- */
+  const cx = ARC.cx, cy = ARC.cy;
+  const rOut = ARC.r + 3, rIn = ARC.r - 14;      // 槽宽 17，球（r=9）正好嵌在里面
+  const a0 = Math.PI * 0.985, a1 = Math.PI * 2.015;
+
+  // 槽底：径向渐变，外沿更暗、内侧偏亮，读作"有深度的沟"
+  ctx.beginPath();
+  ctx.arc(cx, cy, rOut, a0, a1);
+  ctx.arc(cx, cy, rIn, a1, a0, true);
+  ctx.closePath();
+  const rg = ctx.createRadialGradient(cx, cy, rIn, cx, cy, rOut);
+  rg.addColorStop(0, 'rgba(8,14,32,.62)');
+  rg.addColorStop(0.55, 'rgba(24,42,84,.72)');
+  rg.addColorStop(1, 'rgba(6,10,24,.90)');
+  ctx.fillStyle = rg;
+  ctx.fill();
+
+  // 横档：沿轨道每 0.075 rad 一条，模拟原版木轨的枕木
+  const stepA = 0.092;
+  for (let a = a0 + stepA; a < a1 - stepA; a += stepA){
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(a) * rIn, cy + Math.sin(a) * rIn);
+    ctx.lineTo(cx + Math.cos(a) * rOut, cy + Math.sin(a) * rOut);
+    ctx.strokeStyle = 'rgba(4,7,18,.55)';
+    ctx.lineWidth = 2.1;
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(150,190,250,.16)';
+    ctx.lineWidth = 0.8;
+    ctx.stroke();
+  }
+
+  // 内壁：一条亮棱 + 一条暗沟
+  ctx.beginPath(); ctx.arc(cx, cy, rIn, a0, a1);
+  ctx.strokeStyle = 'rgba(6,10,22,.9)'; ctx.lineWidth = 3.4; ctx.stroke();
+  ctx.strokeStyle = 'rgba(120,164,230,.42)'; ctx.lineWidth = 1.1; ctx.stroke();
+  // 外壁亮棱（压在墙体之上，保住原版那条霓虹边）
+  ctx.beginPath(); ctx.arc(cx, cy, rOut, a0, a1);
+  ctx.strokeStyle = 'rgba(150,205,255,.34)'; ctx.lineWidth = 1.4; ctx.stroke();
+
+  // 灯座：每 0.22 rad 一个小圆，静态暗灯（亮起由任务靶/星道灯自己画）
+  for (let a = a0 + 0.16; a < a1 - 0.1; a += 0.22){
+    const lx = cx + Math.cos(a) * (rIn + 3.4);
+    const ly = cy + Math.sin(a) * (rIn + 3.4);
+    ctx.beginPath(); ctx.arc(lx, ly, 2.1, 0, 6.2832);
+    ctx.fillStyle = 'rgba(168,205,255,.26)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(8,14,30,.8)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  /* ---------- ② 发射道 ---------- */
+  const LX0 = 413, LX1 = 455, LY0 = 372, LY1 = 740;
+
+  // 道床：竖向金属渐变（压暗一档，别抢台面）
+  const lg = ctx.createLinearGradient(LX0, 0, LX1, 0);
+  lg.addColorStop(0,    'rgba(8,12,26,.96)');
+  lg.addColorStop(0.26, 'rgba(22,36,68,.94)');
+  lg.addColorStop(0.52, 'rgba(36,56,98,.90)');
+  lg.addColorStop(0.78, 'rgba(20,32,62,.94)');
+  lg.addColorStop(1,    'rgba(6,10,22,.97)');
+  ctx.fillStyle = lg;
+  ctx.beginPath();
+  ctx.moveTo(LX0, LY0);
+  ctx.lineTo(LX1, LY0);
+  ctx.lineTo(LX1, LY1);
+  ctx.lineTo(LX0, LY1);
+  ctx.closePath();
+  ctx.fill();
+
+  /* 道床纹理：原版是竖向木纹，不是横档。
+     这里用极淡的竖线做木纹，横档会读成"梯子"，与弹球台不符。 */
+  for (let k = 1; k <= 9; k++){
+    const lx = LX0 + (LX1 - LX0) * k / 10;
+    ctx.strokeStyle = k % 2 ? 'rgba(160,198,250,.055)' : 'rgba(4,8,18,.30)';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(lx, LY0 + 3); ctx.lineTo(lx, LY1 - 3); ctx.stroke();
+  }
+  // 两道极淡的横向接缝，读作"道床由几段拼成"
+  for (const yy of [LY0 + 120, LY0 + 244]){
+    ctx.fillStyle = 'rgba(4,8,18,.35)';
+    ctx.fillRect(LX0 + 1, yy, LX1 - LX0 - 2, 1.6);
+  }
+
+  // 复道：发射道靠台面一侧（左边）一条窄的并行道，用短横条暗示
+  ctx.fillStyle = 'rgba(6,11,24,.55)';
+  ctx.fillRect(LX0 + 1, LY0 + 6, 5, LY1 - LY0 - 12);
+  for (let y = LY0 + 18; y < LY1 - 10; y += 18){
+    ctx.fillStyle = 'rgba(110,150,210,.30)';
+    ctx.fillRect(LX0 + 1, y, 5, 2);
+  }
+
+  // 两侧道牙：内牙（靠台面）亮，外牙（贴外墙）暗
+  ctx.strokeStyle = 'rgba(120,160,220,.55)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(LX0 + 0.5, LY0); ctx.lineTo(LX0 + 0.5, LY1); ctx.stroke();
+  ctx.strokeStyle = 'rgba(60,86,136,.55)';
+  ctx.beginPath(); ctx.moveTo(LX1 - 0.5, LY0); ctx.lineTo(LX1 - 0.5, LY1); ctx.stroke();
+
+  // 顶端转向帽：球到这里被拐进环道。像原版那样是"道口的弧形盖板"，
+  // 不是霓虹环——所以主体用深色实心，只留一道细青棱。
+  ctx.beginPath();
+  ctx.arc(434, LY0 + 3, 19, Math.PI * 0.98, Math.PI * 2.02);
+  ctx.strokeStyle = 'rgba(5,9,20,.95)';
+  ctx.lineWidth = 14;
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(34,52,88,.95)';
+  ctx.lineWidth = 9;
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(94,231,255,.40)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(200,240,255,.42)';
+  ctx.lineWidth = 0.9;
+  ctx.stroke();
+
+  ctx.restore();
+}
+
 /* 发射口单向闸门（原版 one-way gate）：铰接在外墙的一根细钢条。
    平时斜横在道口挡住回落球；发射时绕铰链翻起贴墙、球过后缓缓落回。
    必须画在坡道高架**之后**——它装在坡道路面上方，画早了会被路面切成两块碎片。 */
@@ -4306,20 +4508,106 @@ function drawGate(){
   ctx.restore();
 }
 
+/* ============================ 排水区 (drain bay) ============================
+   照原版结构：挡板下方是一块紫色放射星爆（"能量井"），正中一个排水孔，
+   两侧各一块深色铭牌三角板。原版这块是台面最能读出"这是弹球台"的图形，
+   之前只有一片黑色渐变，所以整块显得空。 */
 function drawDrainZone(){
+  const D = {x:240, y:768, r:80};
   ctx.save();
-  const g = ctx.createLinearGradient(0, 726, 0, 800);
-  g.addColorStop(0, 'rgba(0,0,0,0)');
-  g.addColorStop(0.5, 'rgba(0,0,0,.45)');
-  g.addColorStop(1, 'rgba(0,0,0,.88)');
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 726, W, 74);
 
-  const rg = ctx.createRadialGradient(240, 742, 2, 240, 742, 46);
-  rg.addColorStop(0, 'rgba(255,80,100,' + (0.10 + 0.05 * Math.sin(state.time * 3)) + ')');
-  rg.addColorStop(1, 'rgba(255,80,100,0)');
-  ctx.fillStyle = rg;
-  ctx.fillRect(190, 700, 100, 100);
+  // ① 底部压暗：让星爆从暗场里浮出来
+  const g = ctx.createLinearGradient(0, 700, 0, 800);
+  g.addColorStop(0, 'rgba(0,0,0,0)');
+  g.addColorStop(0.45, 'rgba(3,5,14,.55)');
+  g.addColorStop(1, 'rgba(2,3,10,.92)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 700, W, 100);
+
+  // ② 紫色放射星爆：11 条长短交替的尖角，绕排水孔一圈
+  ctx.save();
+  ctx.translate(D.x, D.y);
+  ctx.beginPath();
+  const N = 11;
+  for (let i = 0; i < N; i++){
+    const a = -Math.PI / 2 + (i / N) * Math.PI * 2;
+    const a2 = -Math.PI / 2 + ((i + 0.5) / N) * Math.PI * 2;
+    const a3 = -Math.PI / 2 + ((i + 1) / N) * Math.PI * 2;
+    const len = (i % 2 ? D.r * 0.72 : D.r) * (1 + 0.06 * Math.sin(state.time * 1.7 + i));
+    if (i === 0) ctx.moveTo(Math.cos(a) * 16, Math.sin(a) * 16);
+    ctx.lineTo(Math.cos(a) * len, Math.sin(a) * len);
+    ctx.quadraticCurveTo(Math.cos(a2) * len * 0.46, Math.sin(a2) * len * 0.46,
+                         Math.cos(a3) * 16, Math.sin(a3) * 16);
+  }
+  ctx.closePath();
+  const sg = ctx.createRadialGradient(0, 0, 8, 0, 0, D.r);
+  sg.addColorStop(0, 'rgba(150,116,220,.86)');
+  sg.addColorStop(0.45, 'rgba(104,74,170,.62)');
+  sg.addColorStop(1, 'rgba(44,28,86,0)');
+  ctx.fillStyle = sg;
+  ctx.fill();
+  // 星爆边缘一圈极细亮线，读作"发光等离子体"
+  ctx.strokeStyle = 'rgba(186,152,255,.30)';
+  ctx.lineWidth = 1.1;
+  ctx.stroke();
+  ctx.restore();
+
+  // ③ 排水孔：深黑椭圆 + 内侧一圈冷光，球从这里掉下去
+  ctx.beginPath();
+  ctx.ellipse(D.x, D.y + 4, 15, 8, 0, 0, 6.2832);
+  const hg = ctx.createRadialGradient(D.x, D.y + 4, 1, D.x, D.y + 4, 15);
+  hg.addColorStop(0, 'rgba(0,0,0,1)');
+  hg.addColorStop(0.7, 'rgba(4,6,16,.98)');
+  hg.addColorStop(1, 'rgba(40,30,70,.6)');
+  ctx.fillStyle = hg;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(150,120,220,.42)';
+  ctx.lineWidth = 1.2;
+  ctx.stroke();
+
+  /* ④ 两侧铭牌三角板（原版 CINEMATRONICS / MAXIS 的位置）。
+     右板必须止步于发射道内牙（x=413），否则会被道床整块盖住。 */
+  const plate = function(pts){
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.closePath();
+    const pg = ctx.createLinearGradient(pts[0][0], 730, pts[1][0], 800);
+    pg.addColorStop(0, 'rgba(22,30,54,.96)');
+    pg.addColorStop(1, 'rgba(9,13,26,.98)');
+    ctx.fillStyle = pg;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(96,132,196,.45)';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+    // 斜向压纹
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.closePath(); ctx.clip();
+    ctx.strokeStyle = 'rgba(120,160,225,.07)';
+    ctx.lineWidth = 1;
+    for (let k = 0; k < 7; k++){
+      ctx.beginPath(); ctx.moveTo(pts[0][0] + k * 18, 800); ctx.lineTo(pts[0][0] + 60 + k * 18, 726); ctx.stroke();
+    }
+    ctx.restore();
+  };
+  plate([[14, 730], [14, 800], [104, 800], [56, 730]]);          // 左
+  plate([[352, 730], [352, 800], [410, 800], [382, 730]]);       // 右（避开 x>=413 的发射道）
+
+  // ⑤ 铭牌文字
+  ctx.save();
+  ctx.font = '700 8px ui-monospace,Menlo,monospace';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = 'rgba(196,168,110,.62)';
+  ctx.fillText('PINBALL  STAR', 20, 780);
+  ctx.textAlign = 'right';
+  ctx.fillStyle = 'rgba(150,185,240,.50)';
+  ctx.fillText('MAXIS', 404, 780);
+  ctx.restore();
+
   ctx.restore();
 }
 
@@ -4545,38 +4833,90 @@ function drawSpotNamesRaw(){
 }
 
 /* ---- 原版补全区：落靶 / 危险带 / 中央挡柱 / 超空间 ---- */
+/* 落靶架：横排三枚立靶（原版结构）。一条横向金属基座把它们串起来，
+   每枚靶顶一个小球头；击落后靶身压平缩进基座，读作"已放下"。 */
 function drawDropBank(){
+  const t0 = DROP_BANK.t[0], t2 = DROP_BANK.t[2];
+  const y = DROP_BANK.y;
   ctx.save();
-  // 靶架：一条贴右墙的深色导轨，读作"靶的底座"
-  ctx.strokeStyle = 'rgba(24,34,60,.95)';
-  ctx.lineWidth = 8; ctx.lineCap = 'round';
-  ctx.beginPath();
-  ctx.moveTo(DROP_BANK.x, DROP_BANK.t[0].y - 13);
-  ctx.lineTo(DROP_BANK.x, DROP_BANK.t[2].y + 13);
-  ctx.stroke();
-  ctx.strokeStyle = 'rgba(130,165,220,.30)'; ctx.lineWidth = 1.4; ctx.stroke();
 
+  // 横向基座：暗底 + 中央银棱
+  const gy = ctx.createLinearGradient(0, y + 10, 0, y + 20);
+  gy.addColorStop(0, 'rgba(10,16,32,.98)');
+  gy.addColorStop(0.5, 'rgba(120,152,200,.85)');
+  gy.addColorStop(1, 'rgba(10,16,32,.98)');
+  ctx.fillStyle = gy;
+  rr(t0.x - 13, y + 11, (t2.x - t0.x) + 26, 9, 4);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(180,212,255,.30)';
+  ctx.lineWidth = 1;
+  rr(t0.x - 13, y + 11, (t2.x - t0.x) + 26, 9, 4);
+  ctx.stroke();
+
+  const w = DROP_BANK.w, h = DROP_BANK.h;
   for (let i = 0; i < DROP_BANK.t.length; i++){
-    const t = DROP_BANK.t[i], down = DROP_BANK.down[i], pop = DROP_BANK.pop[i];
-    const w = DROP_BANK.w, h = DROP_BANK.h;
+    const tg = DROP_BANK.t[i], down = DROP_BANK.down[i], pop = DROP_BANK.pop[i];
     ctx.save();
-    ctx.translate(t.x, t.y);
+    ctx.translate(tg.x, tg.y);
+
     if (down){
-      // 倒下的靶：只剩一条压平的暗条，配合架子的空位读作"已击落"
-      ctx.globalAlpha = 0.5;
-      ctx.fillStyle = 'rgba(58,72,108,.9)';
-      ctx.fillRect(-w / 2, 1, w, 3);
+      /* 已击落：靶身倒进台面，只在基座上留一个空槽——
+         槽底压暗、边缘留一圈金属高光，读作"这里原本有一枚靶"。 */
+      const sg2 = ctx.createLinearGradient(0, h / 2 - 8, 0, h / 2);
+      sg2.addColorStop(0, 'rgba(6,10,20,.98)');
+      sg2.addColorStop(1, 'rgba(30,42,68,.95)');
+      ctx.fillStyle = sg2;
+      ctx.fillRect(-w / 2, h / 2 - 8, w, 8);
+      ctx.strokeStyle = 'rgba(126,158,206,.55)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(-w / 2 + 0.5, h / 2 - 8, w - 1, 8);
+      ctx.fillStyle = 'rgba(180,212,255,.22)';
+      ctx.fillRect(-w / 2 + 1, h / 2 - 8, w - 2, 1.2);
     } else {
-      ctx.fillStyle = 'rgba(232,244,255,.96)';
-      ctx.shadowColor = 'rgba(150,210,255,.95)';
-      ctx.shadowBlur = 7 + pop * 16;
+      /* 靶身用琥珀黄——原版那组 drop target 就是黄色块，
+         在深蓝台面上是最跳的一处"该打这里"。方平板 + 右侧厚度面，不用圆角。 */
+      const bg = ctx.createLinearGradient(-w / 2, -h / 2, w / 2, h / 2);
+      bg.addColorStop(0,    '#ffe9a0');
+      bg.addColorStop(0.42, '#f2c141');
+      bg.addColorStop(0.78, '#c9922a');
+      bg.addColorStop(1,    '#8e6418');
+      ctx.fillStyle = bg;
+      if (pop > 0.05){
+        ctx.shadowColor = 'rgba(255,206,84,.95)';
+        ctx.shadowBlur = pop * 18;
+      }
       ctx.fillRect(-w / 2, -h / 2, w, h);
       ctx.shadowBlur = 0;
-      ctx.strokeStyle = 'rgba(96,134,196,.9)'; ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(60,42,10,.85)';
+      ctx.lineWidth = 1.1;
       ctx.strokeRect(-w / 2, -h / 2, w, h);
-      // 靶心一道蓝线，远看像"待击落"的靶面
-      ctx.fillStyle = 'rgba(74,140,255,.75)';
-      ctx.fillRect(-w / 2 + 2, -1.1, w - 4, 2.2);
+      // 右侧厚度面
+      ctx.fillStyle = 'rgba(74,52,14,.9)';
+      ctx.beginPath();
+      ctx.moveTo(w / 2, -h / 2); ctx.lineTo(w / 2 + 2.4, -h / 2 + 2);
+      ctx.lineTo(w / 2 + 2.4, h / 2 + 2); ctx.lineTo(w / 2, h / 2);
+      ctx.closePath(); ctx.fill();
+      // 靶帽：顶上一道横向银条（不是球头，球头会读成"药瓶"）
+      const cg = ctx.createLinearGradient(-w / 2, 0, w / 2, 0);
+      cg.addColorStop(0, 'rgba(90,110,148,.95)');
+      cg.addColorStop(0.5, 'rgba(206,224,250,.98)');
+      cg.addColorStop(1, 'rgba(90,110,148,.95)');
+      ctx.fillStyle = cg;
+      ctx.fillRect(-w / 2 - 1.5, -h / 2 - 3.4, w + 3, 3.2);
+      ctx.strokeStyle = 'rgba(30,42,70,.8)';
+      ctx.lineWidth = 0.8;
+      ctx.strokeRect(-w / 2 - 1.5, -h / 2 - 3.4, w + 3, 3.2);
+      // 靶面：上下两道暗刻线 + 中央一条亮准星
+      ctx.strokeStyle = 'rgba(96,66,14,.55)';
+      ctx.lineWidth = 0.9;
+      for (let k = 1; k <= 2; k++){
+        ctx.beginPath();
+        ctx.moveTo(-w / 2 + 2, -h / 2 + k * h / 3);
+        ctx.lineTo(w / 2 - 2, -h / 2 + k * h / 3);
+        ctx.stroke();
+      }
+      ctx.fillStyle = 'rgba(255,248,214,.9)';
+      ctx.fillRect(-w / 2 + 2.5, -1.2, w - 5, 2.4);
     }
     ctx.restore();
   }
@@ -7029,6 +7369,7 @@ function render(){
   drawPlunger();
   drawDeployGauge();
   drawWalls();
+  drawBoardStructure();     // 顶部环道 + 发射道枕木（静态层，逐帧贴图）
   drawFuelLights();
   drawSlings();
   drawOutGates();
@@ -7469,6 +7810,7 @@ window.__PS = {
         drawPlayfieldDeco();
         drawTableLight();
         drawWalls();
+        drawBoardStructureRaw();   // 顶部环道 + 发射道枕木：烘进底图，不在动态层重复画
         drawFuelLights();
         drawDeployGauge();
       } else if (which === 'ramp' || which === 'deck') {
