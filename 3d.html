@@ -904,10 +904,10 @@ const HAZARDS = [
 
 /* ③ 中央挡柱 (Center Post)：排水口正中的可升降立柱，升起时封住中央直落。
    由危险带填满触发（原版 Center Post 的用法）。 */
-/* 中央挡柱：立在**两挡板尖端之间**（y=740），不是排水孔里。
-   排水孔在 (240,772)，原来柱子放在 756 —— 底部正好坐进孔口，
-   看起来就像"从洞里弹出来"。尖端连线在 y≈747，柱子放 740 正好夹在中间。 */
-const CENTER_POST = {x:240, y:740, r:7, up:0, t:0};
+/* 中央挡柱：**从排水孔里升起来**（原版就是这样：中间的柱子从下方升起护球）。
+   孔心 = 星爆中心的暗椭圆 (240, 772)，半径 15x8。
+   柱子放在孔心，升起时从孔里长出来、落下时缩回孔里——孔口始终露在柱子周围一圈。 */
+const CENTER_POST = {x:240, y:772, r:7, up:0, t:0, holeR:18, holeRy:9.5};
 
 /* ④ 超空间 (Hyperspace)：环道顶点的 rollover。三盏星道灯全亮后冲过顶点，
    触发一次超空间发射：大额奖励 + 倍率，并清空星道灯重来。 */
@@ -2919,11 +2919,12 @@ function stepBall(b, dt){
       if (resolveCirc(b, dtg.x, dtg.y, 8, 0.42)) hitDropTarget(i);
     }
     // 中央挡柱：只在升起时是实体
-    /* 挡柱碰撞取**柱身中点**而不是顶帽：原来圆心跟着帽子上移 20*up，
-       球从上面落下来时柱身那段是空的，会直接穿过去。 */
+    /* 挡柱碰撞用**整条线段**，不能用单个圆：
+       柱子升起 36px、宽 15px，一个半径 9 的圆只盖住中段，球会从柱顶穿过去。
+       线段从柱顶（孔口上方 36）一直连到孔口，半径 7.5 = 柱身半宽。 */
     if (CENTER_POST.up > 0.05){
-      resolveCirc(b, CENTER_POST.x, CENTER_POST.y - 10 * CENTER_POST.up,
-                  CENTER_POST.r + 1, 0.45);
+      resolveSeg(b, CENTER_POST.x, CENTER_POST.y + 2 - 36 * CENTER_POST.up,
+                 CENTER_POST.x, CENTER_POST.y + 2, 7.5, 0.45);
     }
     // 危险带：纯传感器，滚过即点亮
     for (let k = 0; k < HAZARDS.length; k++){
@@ -4592,7 +4593,9 @@ function drawDrainZone(){
 
   // ③ 排水孔：深黑椭圆 + 内侧一圈冷光，球从这里掉下去
   ctx.beginPath();
-  ctx.ellipse(D.x, D.y + 4, 15, 8, 0, 0, 6.2832);
+  /* 孔口做到 18x9.5：中央挡柱（宽 15）升起时四周仍留一圈暗环，
+     读作"柱子插在孔里"。孔做 15 刚好被柱子填满，就只剩一根悬空的杆。 */
+  ctx.ellipse(D.x, D.y + 4, 18, 9.5, 0, 0, 6.2832);
   const hg = ctx.createRadialGradient(D.x, D.y + 4, 1, D.x, D.y + 4, 15);
   hg.addColorStop(0, 'rgba(0,0,0,1)');
   hg.addColorStop(0.7, 'rgba(4,6,16,.98)');
@@ -5045,43 +5048,91 @@ function drawHazards(){
   ctx.restore();
 }
 
+/* 中央挡柱：从排水孔里升起。
+   up=0 完全缩回（孔里什么都看不见，只有那个暗椭圆）；
+   up=1 升到最高（柱顶高出孔口 22px）。
+   画法顺序很重要：先把孔口重新压暗一遍（柱子挡住了原本的孔），
+   再画柱子，最后在孔口补一圈"被顶开的光"——这样才读作"从洞里顶出来"。 */
 function drawCenterPost(){
-  if (CENTER_POST.up <= 0.02) return;
   const p = CENTER_POST;
-  const lift = 20 * p.up;
-  const topY = p.y - lift;
+  if (p.up <= 0.02) return;
+  /* 升起高度 36：柱顶到 y≈738，正好顶到两挡板尖端之间，
+     挡住中央直落 —— 这才是中央挡柱该起的作用（原来只升 22，柱顶还在孔里）。 */
+  const lift = 36 * p.up;
+  const topY = p.y + 2 - lift;          // 孔口略低于中心
   ctx.save();
-  /* 底座是**从台面升起的机构**：一圈金属法兰 + 内圈亮环。
-     原来画的是一块暗椭圆（读作洞口），柱子从里面长出来就像"从洞里弹出"。 */
-  ctx.beginPath(); ctx.ellipse(p.x, p.y + 1, 11.5, 5, 0, 0, 6.2832);
-  const baseG = ctx.createLinearGradient(p.x - 11.5, 0, p.x + 11.5, 0);
-  baseG.addColorStop(0, 'rgba(20,30,54,.98)');
-  baseG.addColorStop(0.45, 'rgba(116,146,196,.98)');
-  baseG.addColorStop(1, 'rgba(20,30,54,.98)');
-  ctx.fillStyle = baseG;
+
+  /* ① 孔口内侧阴影：柱子撑满了孔，孔壁被挡住的暗色 */
+  ctx.beginPath(); ctx.ellipse(p.x, p.y + 2, p.holeR, p.holeRy, 0, 0, 6.2832);
+  ctx.fillStyle = 'rgba(2,3,8,.96)';
   ctx.fill();
-  ctx.strokeStyle = 'rgba(190,220,255,.55)'; ctx.lineWidth = 1;
+
+  /* ② 柱身：从孔里伸出来的一段金属杆，越靠近孔口越暗（在洞里） */
+  const shaftTop = topY;
+  const shaftBot = p.y + 6;             // 沉进孔口一点
+  const sg = ctx.createLinearGradient(p.x - 8, 0, p.x + 8, 0);
+  sg.addColorStop(0,    'rgba(10,16,32,.99)');
+  sg.addColorStop(0.26, 'rgba(104,136,186,.99)');
+  sg.addColorStop(0.50, 'rgba(214,236,255,.99)');
+  sg.addColorStop(0.74, 'rgba(104,136,186,.99)');
+  sg.addColorStop(1,    'rgba(10,16,32,.99)');
+  ctx.fillStyle = sg;
+  ctx.beginPath();
+  ctx.moveTo(p.x - 7.5, shaftBot);
+  ctx.lineTo(p.x - 7.5, shaftTop);
+  ctx.arc(p.x, shaftTop, 7.5, Math.PI, Math.PI * 2);
+  ctx.lineTo(p.x + 7.5, shaftBot);
+  ctx.closePath();
+  ctx.fill();
+  // 柱身暗底轮廓：让柱从暗孔里"立"出来，边缘不糊
+  ctx.strokeStyle = 'rgba(4,7,16,.85)';
+  ctx.lineWidth = 1.1;
   ctx.stroke();
-  // 内圈亮环：读作"柱子的安装座"
-  ctx.beginPath(); ctx.ellipse(p.x, p.y + 1, 7.5, 3.2, 0, 0, 6.2832);
-  ctx.strokeStyle = 'rgba(214,238,255,.42)'; ctx.lineWidth = 1.1;
+
+  /* ③ 两圈箍环：金属杆的关节，读作"机械活塞"而不是一根光管 */
+  for (const u of [0.34, 0.70]){
+    const yy = shaftBot + (shaftTop - shaftBot) * u;
+    ctx.beginPath(); ctx.ellipse(p.x, yy, 8, 2.2, 0, 0, 6.2832);
+    ctx.fillStyle = 'rgba(30,46,76,.95)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(178,208,248,.55)';
+    ctx.lineWidth = 0.9;
+    ctx.stroke();
+  }
+
+  /* ④ 顶帽：半球 + 高光 */
+  const capG = ctx.createLinearGradient(p.x - p.r, topY - p.r, p.x + p.r, topY);
+  capG.addColorStop(0, 'rgba(228,242,255,.98)');
+  capG.addColorStop(0.55, 'rgba(150,190,240,.98)');
+  capG.addColorStop(1, 'rgba(52,74,112,.98)');
+  ctx.beginPath(); ctx.arc(p.x, topY, p.r + 1.2, 0, 6.2832);
+  ctx.fillStyle = capG;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(214,238,255,.80)';
+  ctx.lineWidth = 1.1;
   ctx.stroke();
-  // 柱身：左暗右亮的圆柱
-  const g = ctx.createLinearGradient(p.x - 7, 0, p.x + 7, 0);
-  g.addColorStop(0, 'rgba(10,16,32,.98)');
-  g.addColorStop(0.45, 'rgba(150,200,255,.95)');
-  g.addColorStop(1, 'rgba(10,16,32,.98)');
-  ctx.fillStyle = g;
-  ctx.fillRect(p.x - 6, topY, 12, p.y - topY);
-  // 顶帽
-  ctx.beginPath(); ctx.arc(p.x, topY, p.r, Math.PI, Math.PI * 2); ctx.fill();
-  ctx.strokeStyle = 'rgba(200,235,255,.85)';
-  ctx.lineWidth = 1.3;
-  ctx.beginPath(); ctx.arc(p.x, topY, p.r, Math.PI, Math.PI * 2); ctx.stroke();
-  // 剩余时间环
+  ctx.beginPath();
+  ctx.arc(p.x - 2.4, topY - 2.6, p.r * 0.34, 0, 6.2832);
+  ctx.fillStyle = 'rgba(255,255,255,.85)';
+  ctx.fill();
+
+  /* ⑤ 孔沿内壁的冷光：柱子升起时把孔口照亮，说明"是从这里出来的" */
+  ctx.beginPath();
+  ctx.ellipse(p.x, p.y + 2, p.holeR - 1, p.holeRy - 0.6, 0, 0, 6.2832);
+  ctx.strokeStyle = 'rgba(94,231,255,' + (0.24 + 0.30 * p.up) + ')';
+  ctx.lineWidth = 1.6;
+  ctx.stroke();
+  // 上方半圈的受光更强（光从台面上方来）
+  ctx.beginPath();
+  ctx.ellipse(p.x, p.y + 2, p.holeR - 1, p.holeRy - 0.6, 0, Math.PI * 1.06, Math.PI * 1.94);
+  ctx.strokeStyle = 'rgba(200,240,255,' + (0.30 + 0.34 * p.up) + ')';
+  ctx.lineWidth = 1.2;
+  ctx.stroke();
+
+  /* ⑥ 剩余时间环：画在顶帽上方，不压柱子 */
   const k = Math.max(0, Math.min(1, p.t / 6));
   ctx.beginPath();
-  ctx.arc(p.x, topY, p.r + 3, -Math.PI / 2, -Math.PI / 2 + 6.2832 * k);
+  ctx.arc(p.x, topY, p.r + 5, -Math.PI / 2, -Math.PI / 2 + 6.2832 * k);
   ctx.strokeStyle = 'rgba(94,231,255,.85)';
   ctx.lineWidth = 1.6;
   ctx.stroke();
