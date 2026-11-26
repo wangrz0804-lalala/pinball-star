@@ -33,7 +33,7 @@ const HEAD = 140;            // backglass height
 const CW = W, CH = H + HEAD; // canvas size
 
 const cv  = document.getElementById('c');
-let ctx = cv.getContext('2d');
+let ctx = guardCtx(cv.getContext('2d'));
 const DPR = Math.min(window.devicePixelRatio || 1, 2);
 if (window.__PS_VIEW){
   // 微信小游戏：CSS 缩放无效，缓冲区直接铺满屏幕物理像素；逻辑画面在 render 里用 VIEW 等比居中
@@ -62,6 +62,61 @@ const C = {
 };
 
 const GUTTER = '#04050d';   // 小游戏留边底色：与台面最深处同色，留边看不出边界
+
+/* 8 位十六进制色（#RRGGBBAA）在个别机型的小游戏 canvas 上解析不一致：有的直接当非法值丢弃，
+   fillStyle 于是沿用上一次的颜色，整块区域被染成上一种色；有的当成不透明。
+   所有带透明度的颜色一律走这里转 rgba()，不再拼 #RRGGBBAA。 */
+function hexA(hex, a){
+  if (typeof hex !== 'string' || hex.charAt(0) !== '#' || hex.length < 7) return hex;
+  const r = parseInt(hex.substr(1, 2), 16), g = parseInt(hex.substr(3, 2), 16), b = parseInt(hex.substr(5, 2), 16);
+  if (isNaN(r) || isNaN(g) || isNaN(b)) return hex;
+  return 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
+}
+/* 渐变颜色的最后一道闸：真机 canvas 的 addColorStop 收到非法颜色会**抛异常**，
+   一旦抛在某个绘制函数中间，这个函数后面的 restore 全部跳过 —— save 栈越积越深，
+   后续帧就带着上一次的 clip / alpha / 合成模式继续画，表现正是"整屏被一层颜色蒙住"。
+   这里把 addColorStop 包成永不抛：非法色退化成透明，绘制流程不会被打断。 */
+function guardGradient(g){
+  if (!g || g.__psGuard) return g;
+  try {
+    const add = g.addColorStop;
+    if (typeof add !== 'function') return g;
+    g.addColorStop = function(p, c){
+      try { add.call(this, p, c); }
+      catch(e){ try { add.call(this, p, 'rgba(0,0,0,0)'); } catch(e2){} }
+    };
+    g.__psGuard = 1;
+  } catch(e){}
+  return g;
+}
+/* letterSpacing 在部分真机 canvas 上是只读属性：严格模式下赋值会抛 TypeError，
+   同样会把所在函数从中间截断。统一走这个包装，抛不出来。 */
+function setLS(v){
+  try { ctx.letterSpacing = v; } catch(e){}
+}
+/* 帧初状态归位：任何一次绘制抛错都可能跳过后续 restore，让 alpha / 合成模式 / 裁剪 /
+   虚线图案残留到下一帧 —— 表现就是"整屏被一层颜色蒙住，而且一直不散"。 */
+function resetCtxState(){
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.shadowBlur = 0;
+  ctx.shadowColor = 'rgba(0,0,0,0)';
+  try { ctx.setLineDash([]); } catch(e){}
+  try { ctx.lineDashOffset = 0; } catch(e){}
+  setLS('0px');
+}
+/* 一次包住某个 2D 上下文的渐变工厂：不管调用点传什么颜色，addColorStop 都不会抛。
+   主画布、离屏画布、每张缓存画布都要过一遍（缓存画布是真机上最容易踩雷的地方）。 */
+function guardCtx(c){
+  if (!c || c.__psGuardCtx) return c;
+  try {
+    const rg = c.createRadialGradient, lg = c.createLinearGradient;
+    if (typeof rg === 'function') c.createRadialGradient = function(){ return guardGradient(rg.apply(this, arguments)); };
+    if (typeof lg === 'function') c.createLinearGradient = function(){ return guardGradient(lg.apply(this, arguments)); };
+    c.__psGuardCtx = 1;
+  } catch(e){}
+  return c;
+}
 
 /* ============================================================
    PLATFORM LAYER
@@ -3678,10 +3733,10 @@ function tinyText(txt, x, y, size, color, align, ls){
   ctx.font = '600 ' + size + 'px ui-monospace,Menlo,monospace';
   ctx.textAlign = align || 'left';
   ctx.textBaseline = 'middle';
-  ctx.letterSpacing = (ls === undefined ? '1px' : ls);
+  setLS((ls === undefined ? '1px' : ls));
   ctx.fillStyle = color;
   ctx.fillText(txt, x, y);
-  ctx.letterSpacing = '0px';
+  setLS('0px');
 }
 
 function drawBackglass(){
@@ -3745,7 +3800,8 @@ function drawBackglass(){
   tinyText('弹珠的奔走 · PINBALL STAR', 240, 50, 8, 'rgba(150,190,240,.5)', 'center', '1px');
   // 版本水印（仅小游戏端）：真机上肉眼即可确认跑的是哪一版，避免"改了但没生效"的排查空转
   if (window.__PS_VIEW) tinyText(
-    'BUILD ' + (window.__PS_BUILD || '?') + (window.__PS_BACK ? ' · DB1' : (window.__PS_DBFAIL ? ' · DB!' : ' · DB0')),
+    'BUILD ' + (window.__PS_BUILD || '?') + (window.__PS_BACK ? ' · DB1' : (window.__PS_DBFAIL ? ' · DB!' : ' · DB0'))
+      + (window.__PS_DRAWERR ? ' · E!' : ''),
     240, 62, 7, 'rgba(120,160,215,.45)', 'center', '1px');
 
   // balls left (right, stacked as pips with a BALL caption)
@@ -4070,7 +4126,7 @@ function drawDock(){
 
   const g = ctx.createRadialGradient(d.x, d.y, 3, d.x, d.y, d.r * 2.7);
   g.addColorStop(0, 'rgba(255,255,255,' + (0.10 + d.pop * 0.42) + ')');
-  g.addColorStop(0.4, glowC + '44');
+  g.addColorStop(0.4, hexA(glowC, 0.27));
   g.addColorStop(1, 'rgba(0,0,0,0)');
   ctx.fillStyle = g;
   ctx.beginPath(); ctx.arc(d.x, d.y, d.r * 2.7, 0, 6.2832); ctx.fill();
@@ -4101,7 +4157,7 @@ function drawDock(){
   ctx.beginPath(); ctx.arc(d.x, d.y, R * 0.56, 0, 6.2832);
   ctx.fillStyle = 'rgba(4,8,20,.92)';
   ctx.fill();
-  ctx.strokeStyle = glowC + '99';
+  ctx.strokeStyle = hexA(glowC, 0.60);
   ctx.lineWidth = 1.2;
   ctx.stroke();
 
@@ -4783,12 +4839,12 @@ function drawLaneLamps(){
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.font = '700 8px ui-monospace,Menlo,monospace';
-    ctx.letterSpacing = '1.6px';
+    setLS('1.6px');
     ctx.fillStyle = hot ? 'rgba(255,159,67,.9)' : lvC;
     ctx.shadowColor = hot ? 'rgba(255,159,67,.7)' : lvC;
     ctx.shadowBlur = 9;
     ctx.fillText(hot ? 'HOT BUMPERS' : 'BUMPER LV.' + state.bumperLv, 240, 214);
-    ctx.letterSpacing = '0px';
+    setLS('0px');
     ctx.restore();
   }
 }
@@ -4821,7 +4877,7 @@ function drawMissionTargets(){
     // lamp glow hugging the rail
     const g = ctx.createRadialGradient(t.x, t.y, 1, t.x, t.y, r * 3.4);
     g.addColorStop(0, 'rgba(255,255,255,' + (0.10 + pop * 0.5 + (sel || run ? 0.22 : 0)) + ')');
-    g.addColorStop(0.42, t.c + '66');
+    g.addColorStop(0.42, hexA(t.c, 0.40));
     g.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = g;
     ctx.beginPath();
@@ -5302,7 +5358,7 @@ function drawPosts(){
     ctx.save();
     const g = ctx.createRadialGradient(t.x, t.y, 0, t.x, t.y, r * 2.2);
     g.addColorStop(0, 'rgba(255,255,255,' + (0.10 + t.pop * 0.45) + ')');
-    g.addColorStop(0.4, t.c + '3c');
+    g.addColorStop(0.4, hexA(t.c, 0.24));
     g.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = g;
     ctx.beginPath(); ctx.arc(t.x, t.y, r * 2.2, 0, 6.2832); ctx.fill();
@@ -5595,7 +5651,7 @@ function renderLayerToCache(w, h, drawFn){
     if (!c) return null;
     c.width = Math.max(1, Math.ceil(w * DPR));
     c.height = Math.max(1, Math.ceil(h * DPR));
-    const g = c.getContext('2d');
+    const g = guardCtx(c.getContext('2d'));
     if (!g) return null;
     g.setTransform(DPR, 0, 0, DPR, 0, 0);
     const saved = ctx;
@@ -6375,7 +6431,7 @@ function drawDeckTargets(){
     const col = ln.lit ? C.gold : (sel ? '#7dffd4' : fieldCol);
     // 分流导轨：从上缘汇入这条通道的两条短轨
     ctx.save();
-    ctx.strokeStyle = ln.lit ? 'rgba(255,209,102,.55)' : (fieldCol + '4d');
+    ctx.strokeStyle = ln.lit ? 'rgba(255,209,102,.55)' : hexA(fieldCol, 0.30);
     ctx.lineWidth = 1.4;
     ctx.beginPath();
     ctx.moveTo(ln.x - 9, ln.y - 30); ctx.lineTo(ln.x - 7, ln.y - 8);
@@ -6395,7 +6451,7 @@ function drawDeckTargets(){
     ctx.translate(ln.x, ln.y - 16);
     const g = ctx.createRadialGradient(0, 0, 1, 0, 0, r * 2.2);
     g.addColorStop(0, 'rgba(255,255,255,' + (0.15 + ln.pop * 0.5) + ')');
-    g.addColorStop(0.45, col + '66');
+    g.addColorStop(0.45, hexA(col, 0.40));
     g.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = g;
     ctx.beginPath(); ctx.arc(0, 0, r * 2.2, 0, 6.2832); ctx.fill();
@@ -6427,23 +6483,16 @@ function drawTurrets(){
     // 接触阴影
     ctx.fillStyle = 'rgba(0,0,0,.38)';
     ctx.beginPath(); ctx.ellipse(1.5, R * 0.7, R * 1.05, R * 0.4, 0, 0, 6.2832); ctx.fill();
-    /* 底座环：无倍率时是原版的黄铜环；有场地倍率时换成档位色并加一圈外环，
-       整块甲板跟着倍率换色（原版这三枚 bumper 也是倍率灯组的一部分）。 */
+    /* 场地倍率只染这一圈细描边：不加辉光、不换圆顶、不叠外环。
+       三枚圆盘一起发金光会把整块台面读成"被一层颜色蒙住"（真机尤其明显）。
+       倍率的主视觉放在 ①②③ 三盏通道灯和 HUD 的档位标签上。 */
     const fIdx = state.fieldIdx || 0;
     const fCol = FIELD_C[fIdx];
     ctx.beginPath(); ctx.arc(0, 0, R + 3.5, 0, 6.2832);
-    ctx.fillStyle = fIdx ? (fCol + '38') : 'rgba(255,196,84,.22)'; ctx.fill();
-    ctx.strokeStyle = fIdx ? fCol : 'rgba(255,206,110,.7)';
+    ctx.fillStyle = 'rgba(255,196,84,.22)'; ctx.fill();
+    ctx.strokeStyle = fIdx ? hexA(fCol, 0.85) : 'rgba(255,206,110,.7)';
     ctx.lineWidth = fIdx ? 1.6 : 1.2;
-    if (fIdx){ ctx.shadowColor = fCol; ctx.shadowBlur = 10; }
-    ctx.stroke(); ctx.shadowBlur = 0;
-    // 倍率档位外环（越多档，环越外扩）
-    if (fIdx){
-      ctx.beginPath(); ctx.arc(0, 0, R + 6.5 + fIdx * 0.6, 0, 6.2832);
-      ctx.strokeStyle = fCol + '59';
-      ctx.lineWidth = 1;
-      ctx.stroke();
-    }
+    ctx.stroke();
     // 白圆顶（金属渐变）
     const dome = ctx.createRadialGradient(-R * 0.3, -R * 0.35, 1, 0, 0, R);
     dome.addColorStop(0, '#ffffff');
@@ -6470,9 +6519,9 @@ function drawTurrets(){
     core.addColorStop(0, pop > 0.25 ? '#fff7e0' : '#bfe8ff');
     core.addColorStop(1, '#2f7fd8');
     ctx.fillStyle = core; ctx.fill();
-    ctx.strokeStyle = pop > 0.25 ? '#fff' : (fIdx ? fCol : 'rgba(180,220,255,.85)');
+    ctx.strokeStyle = pop > 0.25 ? '#fff' : 'rgba(180,220,255,.85)';
     ctx.lineWidth = 1.4;
-    ctx.shadowColor = pop > 0.25 ? '#ffe9b0' : (fIdx ? fCol : '#5aa8ff');
+    ctx.shadowColor = pop > 0.25 ? '#ffe9b0' : '#5aa8ff';
     ctx.shadowBlur = 8 + pop * 22 + ballLight(t.x, t.y) * 12;
     ctx.stroke(); ctx.shadowBlur = 0;
     ctx.restore();
@@ -6605,8 +6654,8 @@ function drawWorms(){
     ctx.save();
     // outer nebula halo
     const g = ctx.createRadialGradient(w.x, w.y, 1, w.x, w.y, w.r * 2.8);
-    g.addColorStop(0, w.c + (armed ? '70' : '3a'));
-    g.addColorStop(0.5, w.c + (armed ? '30' : '16'));
+    g.addColorStop(0, hexA(w.c, armed ? 0.44 : 0.23));
+    g.addColorStop(0.5, hexA(w.c, armed ? 0.19 : 0.09));
     g.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = g;
     ctx.beginPath(); ctx.arc(w.x, w.y, w.r * 2.8, 0, 6.2832); ctx.fill();
@@ -6619,13 +6668,13 @@ function drawWorms(){
       const fg = ctx.createRadialGradient(w.x, w.y, 1, w.x, w.y, rr2);
       fg.addColorStop(0, 'rgba(0,0,0,1)');
       fg.addColorStop(0.7, 'rgba(2,5,14,.96)');
-      fg.addColorStop(1, w.c + '1f');
+      fg.addColorStop(1, hexA(w.c, 0.12));
       ctx.fillStyle = fg;
       ctx.fill();
     }
 
     // swirl arcs
-    ctx.strokeStyle = w.c + (armed ? 'cc' : '66');
+    ctx.strokeStyle = hexA(w.c, armed ? 0.80 : 0.40);
     ctx.lineWidth = armed ? 2.2 : 1.5;
     for (let k = 0; k < 3; k++){
       const a0 = state.time * (1.6 + k * 0.5) + k * 2.1 + i;
@@ -6703,7 +6752,7 @@ function drawBumpers(){
 
     const g = ctx.createRadialGradient(b.x, b.y, r * 0.2, b.x, b.y, r * 2.1);
     g.addColorStop(0, 'rgba(255,255,255,' + (0.20 + b.pop * 0.5) + ')');
-    g.addColorStop(0.35, lvC + '55');
+    g.addColorStop(0.35, hexA(lvC, 0.33));
     g.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = g;
     ctx.beginPath(); ctx.arc(b.x, b.y, r * 2.1, 0, 6.2832); ctx.fill();
@@ -7028,13 +7077,6 @@ function btn(id, x, y, w, h, label, sub, opts){
   if (!disabled) state.btnRects.push({id:id, x:x, y:y + UI_DY, w:w, h:h, action:opts.action});
 }
 
-function hexA(hex, a){
-  // '#rrggbb' + alpha -> rgba()
-  const h = hex.replace('#','');
-  const r = parseInt(h.substring(0,2),16), g = parseInt(h.substring(2,4),16), b = parseInt(h.substring(4,6),16);
-  return 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
-}
-
 function panel(x, y, w, h, title, accent){
   ctx.save();
   rr(x, y, w, h, 18);
@@ -7050,10 +7092,10 @@ function panel(x, y, w, h, title, accent){
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.font = '700 13px ui-monospace,Menlo,monospace';
-    ctx.letterSpacing = '3px';
+    setLS('3px');
     ctx.fillStyle = hexA(accent || C.blue, 0.9);
     ctx.fillText(title, x + w / 2, y + 26);
-    ctx.letterSpacing = '0px';
+    setLS('0px');
   }
   ctx.restore();
 }
@@ -7099,24 +7141,24 @@ function drawMenu(){
 
   // wordmark
   ctx.font = '800 30px ui-monospace,Menlo,monospace';
-  ctx.letterSpacing = '6px';
+  setLS('6px');
   ctx.shadowColor = C.cyan;
   ctx.shadowBlur = 26;
   ctx.fillStyle = '#eaf8ff';
   ctx.fillText('PINBALL', 240, 120);
   ctx.fillText('STAR', 240, 156);
   ctx.shadowBlur = 0;
-  ctx.letterSpacing = '0px';
+  setLS('0px');
 
   ctx.font = '700 15px ui-monospace,Menlo,monospace';
-  ctx.letterSpacing = '5px';
+  setLS('5px');
   ctx.fillStyle = 'rgba(190,220,255,.85)';
   ctx.fillText('弹珠的奔走', 240, 186);
   ctx.font = '600 9px ui-monospace,Menlo,monospace';
-  ctx.letterSpacing = '3px';
+  setLS('3px');
   ctx.fillStyle = 'rgba(130,175,235,.55)';
   ctx.fillText('太空军校生 · 星际弹射战役', 240, 202);
-  ctx.letterSpacing = '0px';
+  setLS('0px');
 
   // best score
   ctx.font = '700 12px ui-monospace,Menlo,monospace';
@@ -7213,13 +7255,13 @@ function drawWard(){
   ctx.textBaseline = 'middle';
 
   ctx.font = '800 20px ui-monospace,Menlo,monospace';
-  ctx.letterSpacing = '4px';
+  setLS('4px');
   ctx.fillStyle = '#eaf4ff';
   ctx.shadowColor = C.green;
   ctx.shadowBlur = 18;
   ctx.fillText('LOCKER ROOM', 240, 64);
   ctx.shadowBlur = 0;
-  ctx.letterSpacing = '0px';
+  setLS('0px');
   ctx.font = '600 9px ui-monospace,Menlo,monospace';
   ctx.fillStyle = 'rgba(150,190,240,.55)';
   ctx.fillText('弹珠的奔走 · 皮肤 / 拖尾 / 称号', 240, 42);
@@ -7313,22 +7355,22 @@ function drawOverScreen(){
   ctx.textBaseline = 'middle';
 
   ctx.font = '800 28px ui-monospace,Menlo,monospace';
-  ctx.letterSpacing = '4px';
+  setLS('4px');
   ctx.shadowColor = C.magenta;
   ctx.shadowBlur = 24;
   ctx.fillStyle = '#ffd6f2';
   ctx.fillText('RUN OVER', 240, 96);
   ctx.shadowBlur = 0;
-  ctx.letterSpacing = '0px';
+  setLS('0px');
   ctx.font = '600 9px ui-monospace,Menlo,monospace';
   ctx.fillStyle = 'rgba(150,190,240,.55)';
   ctx.fillText('弹珠的奔走 · 本局战报', 240, 72);
 
   ctx.font = '600 9px ui-monospace,Menlo,monospace';
-  ctx.letterSpacing = '3px';
+  setLS('3px');
   ctx.fillStyle = 'rgba(140,175,235,.6)';
   ctx.fillText(state.gameMode === 'daily' ? 'DAILY CHALLENGE' : 'CLASSIC', 240, 126);
-  ctx.letterSpacing = '0px';
+  setLS('0px');
 
   ctx.font = '700 40px ui-monospace,Menlo,monospace';
   ctx.fillStyle = '#eaf5ff';
@@ -7455,13 +7497,13 @@ function drawBoard(){
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.font = '800 20px ui-monospace,Menlo,monospace';
-  ctx.letterSpacing = '4px';
+  setLS('4px');
   ctx.fillStyle = '#eaf4ff';
   ctx.shadowColor = C.violet;
   ctx.shadowBlur = 18;
   ctx.fillText('LEADERBOARD', 240, 52);
   ctx.shadowBlur = 0;
-  ctx.letterSpacing = '0px';
+  setLS('0px');
 
   // 自己的一行：头像 + 昵称 + 本机最佳；右侧改昵称入口
   const myName = PF.profile.getName();
@@ -7618,10 +7660,10 @@ function drawOverlays(){
 
     ctx.globalAlpha = 0.6 + pulse * 0.4;
     ctx.font = '700 12px ui-monospace,Menlo,monospace';
-    ctx.letterSpacing = '1.5px';
+    setLS('1.5px');
     ctx.fillStyle = 'rgba(175,220,255,' + (0.6 + pulse * 0.4) + ')';
     ctx.fillText(state.charging ? '蓄力中… 松开发射' : '按住 空格/屏幕 蓄力', 241, py + ph / 2 + 1);
-    ctx.letterSpacing = '0px';
+    setLS('0px');
     ctx.globalAlpha = 1;
 
     // plunger charge meter (six arch lights, like the original's skill-shot chute)
@@ -7670,9 +7712,9 @@ function drawOverlays(){
     ctx.shadowBlur = 0;
     ctx.font = '600 12px ui-monospace,Menlo,monospace';
     ctx.fillStyle = C.gold;
-    ctx.letterSpacing = '2px';
+    setLS('2px');
     ctx.fillText(state.banner.sub, 240, 460);
-    ctx.letterSpacing = '0px';
+    setLS('0px');
     ctx.restore();
   }
 
@@ -7680,8 +7722,13 @@ function drawOverlays(){
 }
 
 /* ---------------------------- render ---------------------------- */
-function render(){
+function renderFrame(){
   if (window.__PS_VIEW){
+    /* 真机兜底：save 栈一旦被某次异常打断（一个 throw 就会漏掉对应的 restore），后面的帧
+       会带着上一次的 clip / globalAlpha / globalCompositeOperation 继续画 —— 表现就是
+       "整屏被颜色蒙住"且一直不散。restore 多调用是无操作，这里直接把栈清空并归位状态。 */
+    for (let i = 0; i < 12; i++) ctx.restore();
+    resetCtxState();
     const V = window.__PS_VIEW;
     // 真机闪屏的根因之一：每帧把整块缓存做一次全屏缩放 drawImage，部分机型显示层会采样到
     // 半成品帧（闪一下），且大图缩放本身就是大头。改成最便宜也最稳的做法：
@@ -7691,6 +7738,7 @@ function render(){
     ctx.fillRect(0, 0, cv.width, cv.height);
     ctx.setTransform(V.s, 0, 0, V.s, V.ox, V.oy);      // 480x940 逻辑画面等比居中映射到屏幕
   } else {
+    resetCtxState();
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
     ctx.clearRect(0, 0, CW, CH);
   }
@@ -7872,11 +7920,16 @@ function render(){
   ctx.fillRect(0, 0, CW, 14);
   ctx.restore();
 
-  // 帧末提交（小游戏端）：整帧全部画完后，一次性把离屏缓冲贴到屏幕上屏画布。
-  // 微信小游戏主画布实时呈现、没有帧缓冲，一帧内的中间态（星云蓝紫/台面绿光/闪光黄）都会露脸，
-  // 帧一慢就表现为"整屏闪一下颜色，而且像被蒙了一层色"。唯一可靠的解法就是这一处双缓冲。
-  // 网页端没有 presentBack，天然跳过（浏览器本身就是整帧提交）。
-  if (typeof presentBack === 'function') presentBack();
+}
+
+/* 帧末提交 + 异常兜底：整帧画完后一次性把离屏缓冲贴到屏幕上屏画布。
+   微信小游戏主画布实时呈现、没有帧缓冲，一帧内的中间态（星云蓝紫/台面绿光/闪光黄）都会露脸，
+   帧一慢就表现为"整屏闪一下颜色，而且像被蒙了一层色"。唯一可靠的解法就是这一处双缓冲。
+   即使渲染中途抛错，也必须贴图，否则真机会定格在带色中间态（看起来就是整屏蒙了一层颜色）。 */
+function render(){
+  try { renderFrame(); }
+  catch(e){ if (!window.__PS_DRAWERR) window.__PS_DRAWERR = (e && e.message) || String(e); }
+  finally { if (typeof presentBack === 'function') presentBack(); }
 }
 
 /* ---------------------------- pause ---------------------------- */
@@ -7896,11 +7949,11 @@ function drawPause(){
   ctx.fillRect(0, 0, CW, CH);
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.font = '800 22px ui-monospace,Menlo,monospace';
-  ctx.letterSpacing = '4px';
+  setLS('4px');
   ctx.fillStyle = '#eaf4ff';
   ctx.shadowColor = C.violet; ctx.shadowBlur = 16;
   ctx.fillText('PAUSED', 240, 300);
-  ctx.shadowBlur = 0; ctx.letterSpacing = '0px';
+  ctx.shadowBlur = 0; setLS('0px');
   ctx.font = '600 10px ui-monospace,Menlo,monospace';
   ctx.fillStyle = 'rgba(150,190,240,.55)';
   ctx.fillText('弹珠的奔走 · PINBALL STAR', 240, 328);
