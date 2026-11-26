@@ -2533,9 +2533,11 @@ function dropFromDeck(b){
 }
 
 function stepUpperDeck(b, dt){
-  // 甲板滞留寿命：球沿边界+导流墙绕圈（速度高于防卡死阈值）时，12s 后强制送出隧道
+  /* 甲板滞留寿命：球沿边界+导流墙绕圈（速度高于防卡死阈值）时，8s 后强制送出隧道。
+     B 方案收敛的一部分：上层不做"第二个主战场"，球在甲板停留太久会让玩家觉得
+     台面被切成两层、节奏断掉；缩短滞留让甲板回到"过路 + 打靶"的定位。 */
   b.dkLife = (b.dkLife || 0) + dt;
-  if (b.dkLife > 12){
+  if (b.dkLife > 8){
     b.dkLife = 0;
     dropFromDeck(b);
     return;
