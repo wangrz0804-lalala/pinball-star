@@ -511,6 +511,14 @@ const state = {
   deckRides: 0,             // 本局上二层的次数
   saucerLocks: 0,           // 二层分流全亮计数 (三路点亮开多球)
 
+  /* ---- 场地倍率 (原版 Field Multiplier) ----
+     原版规则（control.cpp MultiplierTargetControl）：
+     顶部三个靶各命中一次 → 灯组推进一格 → ScoreMultiplier 依次 2x / 3x / 5x / 10x；
+     每格带 30 秒倒计时，超时掉回上一格（ControlNotifyTimerExpired）。
+     这里挂在二层三路分流灯（①②③）上，逻辑完全一致。 */
+  fieldIdx: 0,              // 0=1x, 1=2x, 2=3x, 3=5x, 4=10x
+  fieldT: 0,                // 当前格的剩余秒数（0 = 无倒计时）
+
   /* ---- 区域化玩法 (zones) ----
      台面按功能分区：发射区 / 接任务区 / 一层碰撞区 / 二层碰撞区 / 虫洞区。
      每个分区都是一个真实的物理模块，任务按分区下发。 */
@@ -1359,17 +1367,20 @@ function popText(x, y, text, color){
 
 /* ---------------------------- scoring ---------------------------- */
 function addScore(n, x, y, color){
+  /* 场地倍率（原版 ScoreMultiplier）在这里统一生效：
+     `n * fieldMult` 是"这一击"的实际得分，弹字显示的也是这个值。 */
+  const fieldMult = FIELD_MULT[state.fieldIdx || 0] || 1;
   /* 反射射门 Reflex Shot：挡板击球后 1.4 秒内命中计分目标，追加 25%。
      reflexUsed 保证一次挡板只能触发一次，避免连打刷分。 */
   if (state.reflexT > 0 && !state.reflexUsed && n >= 500){
     state.reflexUsed = true;
-    const rb = Math.round(n * state.mult * (state.rewardMult || 1) * 0.25);
+    const rb = Math.round(n * state.mult * (state.rewardMult || 1) * fieldMult * 0.25);
     state.score += rb;
     state.banner = {t:1.3, text:'REFLEX SHOT', sub:'+' + rb};
     if (x !== undefined) popText(x, y - 16, 'REFLEX +' + rb, C.gold);
     sfx.select();
   }
-  const v = Math.round(n * state.mult * (state.rewardMult || 1));
+  const v = Math.round(n * state.mult * (state.rewardMult || 1) * fieldMult);
   state.score += v;
 
   /* COMBO: every scoring hit inside a 2.2s window stacks; the stack feeds WARP and the
@@ -2121,6 +2132,45 @@ function guideNow(){
   return {text:'打亮任务靶 选任务', sub:'击打顶部弧线的三个任务靶', spot:'mt0', c:'rgba(140,175,235,.85)'};
 }
 
+/* 场地倍率：原版 score_multipliers = {1,2,3,5,10}（索引即灯数）。
+   颜色跟着档位走 —— 这就是"这个区域会变色"的来源。 */
+const FIELD_MULT = [1, 2, 3, 5, 10];
+const FIELD_C = ['#5ee7ff', '#7dffa8', '#ffd166', '#ff8a5e', '#ff5ecb'];
+const FIELD_SEC = 30;       // 原版每格 30 秒，超时掉一级
+
+/* 场地倍率推进一格（原版 MultiplierTargetControl：三靶全中 → 灯组 +1）。
+   已到 10x 时只刷新倒计时，不再往上加。 */
+function raiseFieldMult(){
+  const before = state.fieldIdx || 0;
+  state.fieldIdx = Math.min(FIELD_MULT.length - 1, before + 1);
+  state.fieldT = FIELD_SEC;
+  const m = FIELD_MULT[state.fieldIdx];
+  const col = FIELD_C[state.fieldIdx];
+  state.banner = {t:1.9, text:'场地倍率 ' + m + 'x', sub:(before ? '由 ' + FIELD_MULT[before] + 'x 提升 · ' : '') + FIELD_SEC + ' 秒内保持'};
+  popText(240, DECK2.cy - 60, '×' + m, col);
+  burst(240, DECK2.cy, col, 26, 320);
+  state.shake = 8;
+  sfx.rank();
+}
+
+/* 每帧：倒计时到了就掉一级（原版 ControlNotifyTimerExpired），还剩就继续计时。 */
+function fieldTick(dt){
+  if (!(state.fieldIdx > 0)) return;
+  if (state.fieldT <= 0) return;
+  state.fieldT -= dt;
+  if (state.fieldT <= 0){
+    state.fieldIdx = Math.max(0, state.fieldIdx - 1);
+    if (state.fieldIdx > 0){
+      state.fieldT = FIELD_SEC;
+      state.banner = {t:1.5, text:'场地倍率 ' + FIELD_MULT[state.fieldIdx] + 'x', sub:'超时降级'};
+    } else {
+      state.fieldT = 0;
+      state.banner = {t:1.5, text:'场地倍率 归零', sub:'重新打亮三路分流灯'};
+    }
+    sfx.select();
+  }
+}
+
 const BUMPER_LV_C = ['#4fa8ff', '#3ddc84', '#ffd166', '#ff5470'];
 const BUMPER_LV_PTS = [40, 150, 400, 1000];
 
@@ -2340,6 +2390,7 @@ function restart(mode){
   state.bhOpen = 0; state.bhPulse = 0; state.bhCd = 0;
   state.warpLink = null; state.warpChain = 0; state.warpChainT = 0;
   state.rideId = 0; state.deployZone = 'lower';
+  state.fieldIdx = 0; state.fieldT = 0;
   // 原版补全区复位
   state.nudgeHeat = 0; state.tiltWarn = 0;
   state.reflexT = 0; state.reflexUsed = false; state.hyperT = 0;
@@ -2503,6 +2554,7 @@ function stepTopModules(b, dt){
         for (let k = 0; k < DECK_LANES.length; k++){ DECK_LANES[k].lit = false; DECK_LANES[k].cd = 0; }
         state.bumpersHot = true;
         addScore(8000, DECK2.cx, DECK2.cy - 40, C.orange);
+        raiseFieldMult();                   // 三路全亮 → 场地倍率推进一格（原版规则）
         lockBall(b);                        // 三路全亮 → 多球
       }
     }
@@ -3262,6 +3314,9 @@ function update(dt){
   }
   if (state.hyperT > 0) state.hyperT = Math.max(0, state.hyperT - dt);
 
+  // 场地倍率倒计时（原版 30 秒一格）
+  if (state.mode === 'play') fieldTick(dt);
+
   // 中央挡柱升降
   if (CENTER_POST.t > 0){
     CENTER_POST.t = Math.max(0, CENTER_POST.t - dt);
@@ -3925,6 +3980,13 @@ function drawBackglass(){
     ctx.globalAlpha = 1;
   } else if (state.bhOpen > 0){
     tinyText('引力井 ' + Math.ceil(state.bhOpen) + 's', W - 24, 122, 8, '#c9b6ff', 'right', '0.6px');
+  }
+  // 场地倍率：右上一行，带剩余秒数（无倍率时不占位）
+  if (state.fieldIdx > 0){
+    const fm = FIELD_MULT[state.fieldIdx], fc = FIELD_C[state.fieldIdx];
+    ctx.globalAlpha = 0.72 + 0.28 * Math.sin(state.time * 4);
+    tinyText('场地 ×' + fm + '  ' + Math.ceil(state.fieldT) + 's', W - 24, 110, 9, fc, 'right', '0.6px');
+    ctx.globalAlpha = 1;
   }
   ctx.restore();
 }
@@ -6302,13 +6364,18 @@ function drawDeckTargets(){
 
   // —— 原版二层的 3 路分流通道灯：横排在台面下缘，每条对应一个任务槽 ——
   // 画出从圆盘区通向通道的分流导轨 + 一枚通道任务灯（点亮=已装填该路任务）
+  /* 三路分流灯的颜色 = 当前场地倍率档位。
+     这就是"①②③ 每点亮一次就变一次色"：
+     三路全亮 → raiseFieldMult() 抬一档 → 这一组灯换成下一档的颜色（2x 青 / 3x 绿 / 5x 金 / 10x 品红）。
+     ln.lit（单路已亮）仍用金色区分"这一路已装填"。 */
+  const fieldCol = FIELD_C[state.fieldIdx || 0];
   for (let i = 0; i < DECK_LANES.length; i++){
     const ln = DECK_LANES[i];
     const sel = (state.selected === i);
-    const col = ln.lit ? C.gold : (sel ? '#7dffd4' : C.cyan);
+    const col = ln.lit ? C.gold : (sel ? '#7dffd4' : fieldCol);
     // 分流导轨：从上缘汇入这条通道的两条短轨
     ctx.save();
-    ctx.strokeStyle = ln.lit ? 'rgba(255,209,102,.55)' : 'rgba(94,224,255,.3)';
+    ctx.strokeStyle = ln.lit ? 'rgba(255,209,102,.55)' : (fieldCol + '4d');
     ctx.lineWidth = 1.4;
     ctx.beginPath();
     ctx.moveTo(ln.x - 9, ln.y - 30); ctx.lineTo(ln.x - 7, ln.y - 8);
@@ -6360,10 +6427,23 @@ function drawTurrets(){
     // 接触阴影
     ctx.fillStyle = 'rgba(0,0,0,.38)';
     ctx.beginPath(); ctx.ellipse(1.5, R * 0.7, R * 1.05, R * 0.4, 0, 0, 6.2832); ctx.fill();
-    // 底座黄铜环
+    /* 底座环：无倍率时是原版的黄铜环；有场地倍率时换成档位色并加一圈外环，
+       整块甲板跟着倍率换色（原版这三枚 bumper 也是倍率灯组的一部分）。 */
+    const fIdx = state.fieldIdx || 0;
+    const fCol = FIELD_C[fIdx];
     ctx.beginPath(); ctx.arc(0, 0, R + 3.5, 0, 6.2832);
-    ctx.fillStyle = 'rgba(255,196,84,.22)'; ctx.fill();
-    ctx.strokeStyle = 'rgba(255,206,110,.7)'; ctx.lineWidth = 1.2; ctx.stroke();
+    ctx.fillStyle = fIdx ? (fCol + '38') : 'rgba(255,196,84,.22)'; ctx.fill();
+    ctx.strokeStyle = fIdx ? fCol : 'rgba(255,206,110,.7)';
+    ctx.lineWidth = fIdx ? 1.6 : 1.2;
+    if (fIdx){ ctx.shadowColor = fCol; ctx.shadowBlur = 10; }
+    ctx.stroke(); ctx.shadowBlur = 0;
+    // 倍率档位外环（越多档，环越外扩）
+    if (fIdx){
+      ctx.beginPath(); ctx.arc(0, 0, R + 6.5 + fIdx * 0.6, 0, 6.2832);
+      ctx.strokeStyle = fCol + '59';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
     // 白圆顶（金属渐变）
     const dome = ctx.createRadialGradient(-R * 0.3, -R * 0.35, 1, 0, 0, R);
     dome.addColorStop(0, '#ffffff');
@@ -6390,9 +6470,9 @@ function drawTurrets(){
     core.addColorStop(0, pop > 0.25 ? '#fff7e0' : '#bfe8ff');
     core.addColorStop(1, '#2f7fd8');
     ctx.fillStyle = core; ctx.fill();
-    ctx.strokeStyle = pop > 0.25 ? '#fff' : 'rgba(180,220,255,.85)';
+    ctx.strokeStyle = pop > 0.25 ? '#fff' : (fIdx ? fCol : 'rgba(180,220,255,.85)');
     ctx.lineWidth = 1.4;
-    ctx.shadowColor = pop > 0.25 ? '#ffe9b0' : '#5aa8ff';
+    ctx.shadowColor = pop > 0.25 ? '#ffe9b0' : (fIdx ? fCol : '#5aa8ff');
     ctx.shadowBlur = 8 + pop * 22 + ballLight(t.x, t.y) * 12;
     ctx.stroke(); ctx.shadowBlur = 0;
     ctx.restore();
@@ -8042,6 +8122,8 @@ window.__PS = {
   // Space Cadet mechanics
   stageNow: stageNow, advanceStage: advanceStage, missionProgress: missionProgress,
   hitLane: hitLane, grantReplay: grantReplay, startMultiball: startMultiball,
+  raiseFieldMult: raiseFieldMult, fieldTick: fieldTick,
+  FIELD_MULT: FIELD_MULT, FIELD_C: FIELD_C, FIELD_SEC: FIELD_SEC,
   hitDropTarget: hitDropTarget, hitHazard: hitHazard, hitHyper: hitHyper,
   guideNow: guideNow,
   DROP_BANK: DROP_BANK, HAZARDS: HAZARDS,
@@ -8138,6 +8220,13 @@ if (location.hash.indexOf('#shot=') === 0){
   if (sc === 'openL'){ OUTGATES[0].open = true; OUTGATES[0].openT = 99; state.gateT = 999; }
   if (sc === 'openR'){ OUTGATES[1].open = true; OUTGATES[1].openT = 99; state.gateT = 999; }
   if (sc === 'select'){ selectMission(0); }
+  /* 场地倍率档位预览（截图用）：fieldN = 第 N 档 */
+  if (sc.indexOf('field') === 0){
+    const n = parseInt(sc.slice(5), 10);
+    state.fieldIdx = Math.max(0, Math.min(4, isFinite(n) ? n : 0));
+    state.fieldT = 24;
+    for (let k = 0; k < DECK_LANES.length; k++) DECK_LANES[k].lit = (k < 2);
+  }
   if (sc === 'run'){ selectMission(0); startMission(0); state.mission.prog = 1; }
   if (sc === 'dropdown'){
     DROP_BANK.down = [true, true, false];
